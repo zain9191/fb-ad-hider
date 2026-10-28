@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Facebook Ad Hider",
+  "version": "1.1.0",
+  "description": "Hides sponsored posts and ads on Facebook. Local rules, plus optional TypeSafe AI detection with your own API key.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://*.facebook.com/*", "https://api.typesafe.ai/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "action": {
+    "default_title": "Facebook Ad Hider",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.facebook.com/*"],
+      "js": ["shared.js", "content.js"],
+      "run_at": "document_start"
+    }
+  ]
+}
