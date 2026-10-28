@@ -5,103 +5,130 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mock Feed Check</title>
   <!--
-    Browser check of dist/content.js against a mock Facebook feed (not real Facebook markup).
-    Run `npm run build`, then open this file in Chrome (file://…/scripts/mock-feed.html).
-    chrome.* is stubbed: nothing is sent anywhere. Results appear at the top of the page.
+    Browser check of dist/content.js against a mock of the 2026 Facebook feed (hand-written from
+    DOM observations, not real Facebook markup): data-virtualized wrappers inside [role="main"],
+    data-ad-rendering-role parts, and the "Ad" label as a body-level portal <span id="_r_N_">
+    that appears after its post.
+    Run `npm run build`, serve the project folder over http://localhost (or open this file from
+    disk) and read the PASS/FAIL list on the right. chrome.* is stubbed: nothing is sent anywhere.
+    The stubbed "fbah/classify" is deterministic: probability 0.95 when ctaText is non-empty or
+    hasAdLabel is true, else 0.05, with latencyMs 42 and batchSize 1 (batchSize 5 for the authors in
+    `batchFor`, as if the worker had asked about them in a batch of lookahead posts; cached: true for
+    the "Cached Corner" author). A request is recorded in `sent` as soon as it arrives (its `urgent`
+    flag in `sentUrgent`; the stub itself ignores it); gate(author) holds the answers for that author
+    until openGate(author) (never, if it is not called). "fbah/counts" messages (the hidden count
+    for the toolbar badge) are recorded in `countsSent`. For the authors in `busyFor`, a lookahead
+    request (urgent not true) is answered "busy" (full worker queue, retryAfterMs 5000); the time
+    of the last such answer is in `busyAnsweredAt`, and `firstSentAt` holds when each author's first
+    request arrived.
   -->
   <style>
     :root { color-scheme: light dark; --fg: #1c1e21; --bg: #fff; --line: #ccd; --ok: #1a7f37; --bad: #c62828; }
     @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --fg: #e4e6eb; --bg: #18191a; --line: #3a3b3c; --ok: #4ade80; --bad: #ff6b81; } }
     :root[data-theme="dark"] { --fg: #e4e6eb; --bg: #18191a; --line: #3a3b3c; --ok: #4ade80; --bad: #ff6b81; }
-    body { margin: 0; padding: 8px 16px; font: 12px/1.3 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
-    #results { position: sticky; top: 0; z-index: 1; margin: 0 0 8px; padding: 6px; max-height: 45vh; overflow: auto; background: var(--bg); border: 1px solid var(--line); white-space: pre-wrap; }
+    body { margin: 0; padding: 8px 16px; font: 11px/1.3 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+    #results { position: fixed; top: 0; right: 0; width: 46vw; height: 100vh; box-sizing: border-box; margin: 0; padding: 6px;
+               overflow: auto; background: var(--bg); border-left: 1px solid var(--line); white-space: pre-wrap; font-size: 11px; }
+    [role="main"] { width: 50vw; }
     .pass { color: var(--ok); } .fail { color: var(--bad); }
-    [role="feed"] > div { border: 1px solid var(--line); margin: 2px 0; padding: 2px 6px; }
-    h3 { margin: 0; font-size: 12px; }
+    [data-virtualized] { border: 1px solid var(--line); margin: 2px 0; padding: 2px 6px; }
+    [data-virtualized="true"] { min-height: 90px; }
+    h4 { margin: 0; font-size: 12px; }
     [role="article"] { margin-left: 12px; font-style: italic; }
+    [data-ad-rendering-role="meta"] { text-transform: uppercase; }
   </style>
 </head>
 <body>
   <pre id="results" aria-live="polite">running…</pre>
-  <div id="spacer"></div>
-  <div role="feed" id="feed"></div>
+  <div role="main">
+    <div id="spacer"></div>
+    <div id="feed"></div>
+  </div>
 
   <script>
     // ---------- chrome.* stub ----------
     const sent = [];
+    const sentUrgent = []; // { header, urgent } per request, in the same order as `sent`
     const syncListeners = [];
     let messageListener = null;
     let mode = "ok"; // "ok" | "no_key"
-    const answeredOnce = new Set();
+    const failFor = new Set(); // headers whose classification always times out
+    const cachedFor = new Set(["Cached Corner"]); // headers answered as worker cache hits
+    const batchFor = new Set(["Batch Bistro", "Batch Boutique"]); // headers answered as part of a batch of 5
+    const countsSent = []; // hiddenCount of every "fbah/counts" message, in order
+    const busyFor = new Set(); // headers whose lookahead requests are turned away as "busy"
+    let busyAnsweredAt = 0;
+    const firstSentAt = new Map(); // header → time its first request arrived
+    const gates = new Map(); // header → { promise, open }: answers wait until the gate is opened
+    function gate(header) {
+      let open;
+      const promise = new Promise((r) => (open = r));
+      gates.set(header, { promise, open });
+    }
+    function openGate(header) {
+      gates.get(header)?.open();
+    }
+    let optionsOpened = 0;
+    let settingsNow = { aiEnabled: true, aiThreshold: 0.85, hideSuggested: false, showAIBadges: true };
     window.chrome = {
       runtime: {
         id: "mock-ext",
         onMessage: { addListener: (fn) => (messageListener = fn) },
         async sendMessage(msg) {
-          if (msg.type !== "fbah/classify") return undefined;
-          sent.push(JSON.parse(JSON.stringify(msg.state)));
-          await new Promise((r) => setTimeout(r, 40));
-          const h = msg.state.header;
-          if (mode === "no_key") return { ok: false, error: "no_key", message: "No TypeSafe API key saved." };
-          if (h === "Rate Limited Bakery" && !answeredOnce.has(h)) {
-            answeredOnce.add(h);
-            return { ok: false, error: "rate_limited", message: "Paused", retryAfterMs: 1200 };
+          const state = msg.type === "fbah/classify" ? JSON.parse(JSON.stringify(msg.state)) : null;
+          if (state) { // recorded when sent, before any delay
+            sent.push(state);
+            sentUrgent.push({ header: state.header, urgent: msg.urgent });
+            if (!firstSentAt.has(state.header)) firstSentAt.set(state.header, Date.now());
           }
-          if (h === "Shop Ad Co") return { ok: true, probability: 0.95, cached: false };
-          return { ok: true, probability: 0.1, cached: false };
+          if (msg.type === "fbah/counts") countsSent.push(msg.hiddenCount);
+          await new Promise((r) => setTimeout(r, 40));
+          if (state && gates.has(state.header)) await gates.get(state.header).promise;
+          if (msg.type === "fbah/aiStatus") {
+            return { hasKey: mode !== "no_key", keyValid: mode === "no_key" ? null : true, callsToday: sent.length, cap: 300, lastError: null };
+          }
+          if (msg.type === "fbah/openOptions") {
+            optionsOpened++;
+            return { opened: true };
+          }
+          if (msg.type === "fbah/counts") return { ok: true };
+          if (!state) return undefined;
+          if (mode === "no_key") return { ok: false, error: "no_key", message: "No TypeSafe API key saved." };
+          if (failFor.has(state.header)) return { ok: false, error: "timeout", message: "TypeSafe did not answer in time", retryAfterMs: 300 };
+          if (busyFor.has(state.header) && msg.urgent !== true) {
+            busyAnsweredAt = Date.now();
+            return { ok: false, error: "busy", message: "Too many posts are waiting for classification.", retryAfterMs: 5000 };
+          }
+          const probability = state.ctaText !== "" || state.hasAdLabel ? 0.95 : 0.05;
+          return cachedFor.has(state.header)
+            ? { ok: true, probability, cached: true, latencyMs: 0 }
+            : { ok: true, probability, cached: false, latencyMs: 42, queuedMs: 0, batchSize: batchFor.has(state.header) ? 5 : 1 };
         },
       },
       storage: {
         sync: {
-          async get() { return { "fbah.settings": { aiEnabled: true, aiThreshold: 0.85, hideSuggested: false } }; },
+          async get() { return { "fbah.settings": settingsNow }; },
           onChanged: { addListener: (fn) => syncListeners.push(fn) },
         },
       },
     };
   </script>
-  <script>
-    // A hidden page (background tab, hidden preview pane) renders no frames, so the real
-    // IntersectionObserver never reports. Fall back to a layout-based stand-in there, and
-    // slow the checks down: Chrome aligns timers in hidden pages to 1 s.
-    const HIDDEN_PAGE = document.visibilityState === "hidden";
-    const SLOW = HIDDEN_PAGE ? 4 : 1;
-    if (HIDDEN_PAGE) {
-      window.IntersectionObserver = class {
-        constructor(cb) {
-          this.cb = cb;
-          this.targets = new Map();
-          setInterval(() => this.poll(), 100);
-        }
-        observe(el) { if (!this.targets.has(el)) this.targets.set(el, null); }
-        unobserve(el) { this.targets.delete(el); }
-        disconnect() { this.targets.clear(); }
-        takeRecords() { return []; }
-        poll() {
-          const entries = [];
-          for (const [el, prev] of this.targets) {
-            const r = el.getBoundingClientRect();
-            const visible = Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
-            const isIntersecting = visible > 0 && r.width > 0;
-            const intersectionRatio = r.height > 0 ? visible / r.height : 0;
-            const key = `${isIntersecting}:${intersectionRatio.toFixed(2)}`;
-            if (key === prev) continue;
-            this.targets.set(el, key);
-            entries.push({ target: el, isIntersecting, intersectionRatio });
-          }
-          if (entries.length > 0) this.cb(entries, this);
-        }
-      };
-    }
-  </script>
   <script src="../dist/shared.js"></script>
   <script src="../dist/content.js"></script>
   <script>
-    // ---------- mock feed ----------
+    // A hidden page (background tab, hidden preview pane) renders no frames: timers are aligned
+    // to 1 s and scroll events are not dispatched. content.js must not depend on either.
+    const HIDDEN_PAGE = document.visibilityState === "hidden";
+    const SLOW = HIDDEN_PAGE ? 3 : 1;
     const feed = document.getElementById("feed");
     const out = document.getElementById("results");
     const lines = [];
     let failures = 0;
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms * SLOW));
+    /** Polls `cond` until it is true or `ms` (× SLOW) have passed. */
+    async function until(cond, ms) {
+      for (const end = Date.now() + ms * SLOW; Date.now() < end && !cond(); ) await sleep(50);
+    }
     function check(name, cond, detail = "") {
       if (!cond) failures++;
       lines.push(`${cond ? "PASS" : "FAIL"} ${name}${!cond && detail ? ` :: ${detail}` : ""}`);
@@ -109,149 +136,361 @@
     }
     function render(done) {
       out.innerHTML = lines.map((l) => `<span class="${l.startsWith("PASS") ? "pass" : "fail"}">${l.replace(/</g, "&lt;")}</span>`).join("\n") +
-        (done ? `\nDONE ${lines.length - failures}/${lines.length} passed (IntersectionObserver: ${HIDDEN_PAGE ? "layout stand-in, page hidden" : "native"})` : "");
+        (done ? `\nDONE ${lines.length - failures}/${lines.length} passed (page ${HIDDEN_PAGE ? "hidden" : "visible"})` : "");
     }
     const sentFor = (header) => sent.filter((s) => s.header === header);
-    function stats() {
-      return new Promise((resolve) => messageListener({ type: "fbah/getStats" }, { id: "mock-ext" }, resolve));
-    }
+    const urgentFor = (header) => sentUrgent.filter((x) => x.header === header).map((x) => x.urgent);
+    const unitOf = (id) => feed.querySelector(`[data-post="${id}"]`);
+    const badgeOf = (id) => {
+      const prev = unitOf(id)?.previousElementSibling;
+      return prev && prev.classList.contains("fbah-badge") ? prev.textContent : null;
+    };
+    const placeholderOf = (id) => {
+      const prev = unitOf(id)?.previousElementSibling;
+      return prev && prev.classList.contains("fbah-placeholder") ? prev.textContent : null;
+    };
+    const hiddenAs = (id) => unitOf(id)?.getAttribute("data-fbah-hidden") ?? null;
+    const chipText = () => document.querySelector("body > .fbah-chip")?.textContent ?? null;
+    const stats = () => new Promise((resolve) => messageListener({ type: "fbah/getStats" }, { id: "mock-ext" }, resolve));
     function changeSettings(patch) {
-      const newValue = { aiEnabled: true, aiThreshold: 0.85, hideSuggested: false, ...patch };
-      for (const fn of syncListeners) fn({ "fbah.settings": { newValue } }, "sync");
+      settingsNow = { ...settingsNow, ...patch };
+      for (const fn of syncListeners) fn({ "fbah.settings": { newValue: settingsNow } }, "sync");
     }
-    const unit = (inner) => `<div>${inner}</div>`; // [role=feed] > div
+    /** Facebook renders the "Ad" word in a body-level portal, after the post. */
+    function portalLabel(id, delayMs) {
+      setTimeout(() => document.body.insertAdjacentHTML("beforeend", `<div class="portal"><span id="${id}">Ad</span></div>`), delayMs);
+    }
 
-    const PHASE1 = [
-      // SP-1 / SP-2 / F4: non-article post container holding comment articles, reactions, counters.
-      unit(`<div aria-posinset="1">
-        <div>Jean Dupont commented</div>
-        <h3><a href="/marie.dubois">Marie Dubois</a></h3>
-        <div><a href="#">12 min</a> · <span aria-label="Shared with Public"></span></div>
-        <div data-ad-preview="message" data-ad-comet-preview="message"><div dir="auto">Happy birthday Marie! Can't wait to see you next week</div><div role="button">See more</div></div>
-        <span role="toolbar" aria-label="See who reacted to this">👍❤️</span>
-        <div role="button"><span>Paul Martin and 23 others</span></div>
-        <div role="button">5 comments</div> <div role="button">Like</div>
-        <div role="article" aria-label="Comment by Alice Commenter">Alice Commenter <span dir="auto">SECRET labelled comment</span> <a href="https://comment.example/x">comment link</a> <span dir="auto">Sponsored</span></div>
-        <div role="article">Bob Unlabelled <span>SECRET unlabelled comment</span></div>
-      </div>`),
-      // SP-2 fallback path: no message container.
-      unit(`<div aria-posinset="2">
-        <h3><a href="/tram">Tram Fans Group</a></h3>
-        <div><span>3 h</span> · <span aria-label="Group"></span></div>
-        <div dir="auto">Interesting article about the new tram line</div>
-        <a href="https://l.facebook.com/l.php?u=https%3A%2F%2Fnews.example%2Ftram" role="link"><span>news.example</span><span>New tram line opens in May</span></a>
-        <div><span>12 comments</span> <span>Paul and 3 others</span> <span>42</span></div>
-      </div>`),
-      // LC-6: organic post linking to the Ad Library (facebook-internal, not wrapped in l.php).
-      unit(`<div aria-posinset="3">
-        <h3><a href="/friend">Friend Researcher</a></h3>
-        <div data-ad-preview="message">Look who is paying for these ads: <a href="https://www.facebook.com/ads/library/?id=123">https://www.facebook.com/ads/library/?id=123</a></div>
-      </div>`),
-      // LC-2: Suggested post, hideSuggested off.
-      unit(`<div aria-posinset="4">
-        <span>Suggested for you</span>
-        <h3><a href="/shop">Local Shop Suggested</a></h3>
-        <div data-ad-preview="message">Weekend sale -30%, Commander</div>
-      </div>`),
-      // Rules still work: ad-disclosure link.
-      unit(`<div aria-posinset="5">
-        <h3><a href="/brand">Real Ad Brand</a></h3>
-        <a href="/ads/about/?id=1"><span>Sponsored</span></a>
-        <div data-ad-preview="message">Buy our stuff</div>
-      </div>`),
-      // SP-3: the page pre-sets the old AI attribute to dodge classification.
-      unit(`<div aria-posinset="6" data-fbah-ai="0">
-        <h3><a href="/shopadco">Shop Ad Co</a></h3>
-        <div data-ad-preview="message" data-fbah-ai="0">Summer sale: 40% off all sneakers. Shop now</div>
-        <a href="https://l.facebook.com/l.php?u=https%3A%2F%2Fsneakers.example%2F" role="link"><div role="button">Shop now</div></a>
-      </div>`),
-    ];
+    // 2026 layout: every post is a [data-virtualized] list item inside [role="main"], parts are
+    // marked with data-ad-rendering-role, no role="article" on posts (comments may have one).
+    function post({ id, author, labelId = null, message = "", preview = null, cta = null }) {
+      return `<div data-virtualized="false" data-post="${id}"><div>
+        <div data-ad-rendering-role="profile_name"><h4><span><a href="/${id}">${author}</a></span> is with <a href="/paul">Paul Tagged</a></h4></div>
+        <div>${labelId
+          ? `<a role="link" href="?__cft__[0]=AZ${id}"><span aria-labelledby="${labelId}"><span></span></span></a>`
+          : `<a href="/${id}/posts/1">3 h</a>`} · <span aria-label="Shared with Public"></span></div>
+        ${message ? `<div data-ad-rendering-role="story_message" data-ad-preview="message" data-ad-comet-preview="message"><div dir="auto">${message}</div><div role="button">See more</div></div>` : ""}
+        ${preview ? `<a href="https://l.facebook.com/l.php?u=${encodeURIComponent(preview.url)}" role="link">
+          <div data-ad-rendering-role="meta"><span>${preview.domain}</span></div>
+          <div data-ad-rendering-role="title"><span>${preview.title}</span></div>
+          <div data-ad-rendering-role="description"><span>${preview.description}</span></div></a>` : ""}
+        ${cta !== null ? `<div data-ad-rendering-role="cta-button"><div role="button">${cta}</div></div>` : ""}
+        <div><span role="toolbar" aria-label="See who reacted to this">👍❤️</span> <span role="button">Paul Martin and 23 others</span> <span role="button">5 comments</span>
+          <span data-ad-rendering-role="like_button"><span role="button">Like</span></span>
+          <span data-ad-rendering-role="comment_button"><span role="button">Comment</span></span>
+          <span data-ad-rendering-role="share_button"><span role="button">Share</span></span></div>
+        <div role="article" aria-label="Comment by Alice Commenter">Alice Commenter <span dir="auto">SECRET comment text</span> <a href="https://comment.example/x">link</a></div>
+      </div></div>`;
+    }
+
+    const A = { id: "A", author: "Marie Dubois", message: "Happy birthday Marie! Can't wait to see you next week" };
+    const B = {
+      id: "B", author: "Cirque du Soleil", labelId: "_r_1_", message: "Experience the magic live this winter",
+      preview: { url: "https://www.cirquedusoleil.com/shows", domain: "CIRQUEDUSOLEIL.COM", title: "Tickets on sale now", description: "Book your seats for the new show" },
+      cta: "", // Facebook often leaves the CTA text empty in the DOM
+    };
+    const C = {
+      id: "C", author: "Sneaker Shop", message: "Summer sale: 40% off all sneakers this weekend only",
+      preview: { url: "https://sneakers.example/sale", domain: "SNEAKERS.EXAMPLE", title: "Summer sale", description: "Free delivery over 50 euros" },
+      cta: "Shop now", // no label at all
+    };
+    const D = {
+      id: "D", author: "Tram Fans Group", message: "Interesting article about the new tram line",
+      preview: { url: "https://news.example/tram", domain: "NEWS.EXAMPLE", title: "New tram line opens in May", description: "Five new stations" },
+    };
 
     async function run() {
       await sleep(300);
 
-      // ---------- phase 1: extraction, privacy, rules ----------
-      feed.innerHTML = PHASE1.join("");
-      await sleep(2500);
+      // ---------- phase 1: AI-first decisions, extraction, privacy ----------
+      feed.innerHTML = [A, B, C, D].map(post).join("");
+      portalLabel("_r_1_", 1000);
+      await sleep(4500);
 
-      const marie = sentFor("Marie Dubois");
-      check("SP-1: one request for wrapper + post container", marie.length === 1, JSON.stringify(sent.map((s) => s.header)));
-      const m = marie[0] ?? { text: "", links: [] };
-      check("SP-1: no comment text or comment links sent", !/SECRET|Alice|Bob|comment\.example/.test(JSON.stringify(sent)), JSON.stringify(m));
-      check("F4: header is the author name only", m.header === "Marie Dubois", m.header);
-      check("SP-2: text is the message only", m.text === "Happy birthday Marie! Can't wait to see you next week", m.text);
-      check("SP-2: no reaction names, counters, timestamp, social line", !/23 others|5 comments|12 min|Jean Dupont|See more|Like/.test(m.text), m.text);
+      const a = sentFor("Marie Dubois");
+      check("A organic: sent exactly once", a.length === 1, String(a.length));
+      const sa = a[0] ?? {};
+      check("A: header is the author only (no tagged people)", sa.header === "Marie Dubois", sa.header);
+      check("A: text is the story_message only", sa.text === A.message, sa.text);
+      check("A: no comments, reactions, counters, buttons, timestamp", !/SECRET|Alice|Paul|23 others|5 comments|Like|Share|See more|3 h|comment\.example/.test(JSON.stringify(sent)), JSON.stringify(sa));
+      check("A: no links, no CTA, no label", JSON.stringify(sa.links) === "[]" && sa.hasCallToActionButton === false && sa.ctaText === "" && sa.hasAdLabel === false, JSON.stringify(sa));
+      check("A: visible with badge 'TypeSafe · not an ad (5%) · 42 ms'", hiddenAs("A") === null && badgeOf("A") === "TypeSafe · not an ad (5%) · 42 ms", `${hiddenAs("A")} / ${badgeOf("A")}`);
+      check("badge is our own previous sibling, not inside the post", unitOf("A").querySelector(".fbah-badge") === null && unitOf("A").previousElementSibling?.classList.contains("fbah-badge"));
+      check(`A inside the window: sent with urgent=${!HIDDEN_PAGE} (urgent only in a visible tab)`,
+        urgentFor("Marie Dubois")[0] === !HIDDEN_PAGE, JSON.stringify(urgentFor("Marie Dubois")));
 
-      const tram = sentFor("Tram Fans Group")[0] ?? { text: "", links: [] };
-      check("SP-2 fallback: body and link title kept", /new tram line/.test(tram.text) && /New tram line opens in May/.test(tram.text), tram.text);
-      check("SP-2 fallback: header, time, counters, 'others' dropped", !/Tram Fans Group|3 h|12 comments|3 others|42/.test(tram.text), tram.text);
-      check("links: l.php unwrapped", JSON.stringify(tram.links) === '["news.example"]', JSON.stringify(tram.links));
+      const b = sentFor("Cirque du Soleil");
+      const lastB = b.at(-1) ?? {};
+      check("B labelled ad: hidden by TypeSafe", hiddenAs("B") === "AI", hiddenAs("B"));
+      check("B: placeholder 'Ad hidden by TypeSafe (95%) · 42 ms — click to show'", placeholderOf("B") === "Ad hidden by TypeSafe (95%) · 42 ms — click to show", placeholderOf("B"));
+      check("B: 1 or 2 requests; the deciding one had hasAdLabel=true (portal label seen)",
+        (b.length === 1 || (b.length === 2 && b[0].hasAdLabel === false)) && lastB.hasAdLabel === true, JSON.stringify(b.map((x) => x.hasAdLabel)));
+      check("B: text = message + preview title + description",
+        lastB.text === "Experience the magic live this winter Tickets on sale now Book your seats for the new show", lastB.text);
+      check("B: links = preview domain (lower-cased) first, l.php unwrapped", JSON.stringify(lastB.links) === '["cirquedusoleil.com"]', JSON.stringify(lastB.links));
+      check("B: empty CTA part → hasCallToActionButton, ctaText ''", lastB.hasCallToActionButton === true && lastB.ctaText === "", JSON.stringify(lastB));
 
-      const friendUnit = feed.querySelector('[aria-posinset="3"]');
-      check("LC-6: Ad Library link is not a sponsored label", !friendUnit.hasAttribute("data-fbah-hidden"));
-      check("LC-6: 'Sponsored' text inside a comment does not hide the post", !feed.querySelector('[aria-posinset="1"]').hasAttribute("data-fbah-hidden"));
-      check("LC-6: organic post was sent to the AI instead", sentFor("Friend Researcher").length === 1);
+      const c = sentFor("Sneaker Shop");
+      check("C unlabelled ad with CTA: sent once, ctaText 'Shop now', hasAdLabel false",
+        c.length === 1 && c[0].ctaText === "Shop now" && c[0].hasAdLabel === false, JSON.stringify(c));
+      check("C: hidden by TypeSafe", hiddenAs("C") === "AI", hiddenAs("C"));
 
-      check("LC-2: Suggested post not sent", sentFor("Local Shop Suggested").length === 0);
-      check("LC-2: Suggested post not hidden", !feed.querySelector('[aria-posinset="4"]').hasAttribute("data-fbah-hidden"));
+      const d = sentFor("Tram Fans Group");
+      check("D organic link share: links deduplicated", d.length === 1 && JSON.stringify(d[0].links) === '["news.example"]', JSON.stringify(d.map((x) => x.links)));
+      check("D: badge 'not an ad (5%) · 42 ms'", badgeOf("D") === "TypeSafe · not an ad (5%) · 42 ms", badgeOf("D"));
 
-      const adUnit = feed.querySelector('[aria-posinset="5"]');
-      check("rules: /ads/about link hides the ad", adUnit.closest("[data-fbah-hidden]") !== null);
-      check("rules: rule-hidden ad not sent", sentFor("Real Ad Brand").length === 0);
-
-      check("SP-3: page-set data-fbah-ai does not exempt a post", sentFor("Shop Ad Co").length === 1);
-      const shop = feed.querySelector('[aria-posinset="6"]');
-      check("AI verdict 0.95 hides the post", shop.closest("[data-fbah-hidden]")?.getAttribute("data-fbah-hidden") === "AI");
-      const fbahAttrs = [...document.querySelectorAll("*")].flatMap((e) =>
-        [...e.attributes].filter((a) => a.name.startsWith("data-fbah") && a.name !== "data-fbah-hidden").map((a) => `${a.name}=${a.value}`));
-      check("SP-3: no AI state written to the DOM (only the page's own data-fbah-ai=0)", fbahAttrs.every((a) => a === "data-fbah-ai=0"), fbahAttrs.join(", "));
-
-      // ---------- phase 2: settings change re-evaluates locally (LC-7) ----------
-      const before = sent.length;
-      changeSettings({ aiThreshold: 0.9 });
       let s = await stats();
-      check("LC-7: AI-hidden post stays hidden right after a settings change", shop.closest("[data-fbah-hidden]") !== null && s.hiddenByAI === 1, JSON.stringify(s));
+      check("stats: 2 hidden by AI, 0 by rules", s.hiddenByAI === 2 && s.hiddenByRules === 0, JSON.stringify(s));
+      check("toolbar badge: the latest 'fbah/counts' sent to the worker is the hidden count (2)",
+        countsSent.at(-1) === s.hiddenCount && countsSent.length <= 6, JSON.stringify(countsSent));
+      await sleep(700);
+      check("chip: 'Ad Hider · TypeSafe: Active · N/300 calls today · 2 hidden by AI'",
+        /^Ad Hider · TypeSafe: Active · \d+\/300 calls today · 2 hidden by AI$/.test(chipText() ?? ""), chipText());
+      const attrs = [...document.querySelectorAll("*")].flatMap((e) =>
+        [...e.attributes].filter((x) => x.name.startsWith("data-fbah") && x.name !== "data-fbah-hidden").map((x) => x.name));
+      check("no AI state written to the DOM (only data-fbah-hidden)", attrs.length === 0, attrs.join(", "));
+
+      // ---------- phase 2: virtualized, then re-rendered in the same wrapper ----------
+      const dUnit = unitOf("D");
+      const dInner = dUnit.innerHTML;
+      dUnit.setAttribute("data-virtualized", "true");
+      dUnit.innerHTML = "";
+      await sleep(1500);
+      check("D virtualized: its badge is removed", badgeOf("D") === null, badgeOf("D"));
+      dUnit.innerHTML = dInner;
+      dUnit.setAttribute("data-virtualized", "false");
+      await sleep(2500);
+      check("D re-rendered: badge back from the stored verdict", badgeOf("D") === "TypeSafe · not an ad (5%) · 42 ms", badgeOf("D"));
+      check("D re-rendered: no new request", sentFor("Tram Fans Group").length === 1, String(sentFor("Tram Fans Group").length));
+
+      // ---------- phase 3: late "Ad" label after a 'not an ad' answer ----------
+      const E = { id: "E", author: "Late Label Bakery", labelId: "_r_9_", message: "Fresh croissants every morning from 7 am" };
+      feed.insertAdjacentHTML("beforeend", post(E));
+      await sleep(3000);
+      check("E: first answer without the label → visible, 'not an ad (5%) · 42 ms'",
+        sentFor("Late Label Bakery").length === 1 && badgeOf("E") === "TypeSafe · not an ad (5%) · 42 ms", `${sentFor("Late Label Bakery").length} / ${badgeOf("E")}`);
+      portalLabel("_r_9_", 0);
+      await sleep(3500);
+      const e = sentFor("Late Label Bakery");
+      check("E: label appears → asked exactly once more, with hasAdLabel=true", JSON.stringify(e.map((x) => x.hasAdLabel)) === "[false,true]", JSON.stringify(e.map((x) => x.hasAdLabel)));
+      check("E: now hidden by TypeSafe", hiddenAs("E") === "AI", hiddenAs("E"));
+      await sleep(2500);
+      check("E: no third request (hard cap of 2 answers)", sentFor("Late Label Bakery").length === 2);
+
+      // ---------- phase 4: settings changes re-use the stored answers ----------
+      const before = sent.length;
       changeSettings({ aiThreshold: 0.99 });
       s = await stats();
-      check("LC-7: raising the threshold above p un-hides it at once", shop.closest("[data-fbah-hidden]") === null && s.hiddenByAI === 0, JSON.stringify(s));
+      check("threshold 0.99: AI-hidden posts shown at once", s.hiddenByAI === 0 && hiddenAs("C") === null && badgeOf("C") === "TypeSafe · not an ad (95%) · 42 ms", `${JSON.stringify(s)} ${badgeOf("C")}`);
       changeSettings({ aiThreshold: 0.85 });
       s = await stats();
-      check("LC-7: lowering it again re-hides from the stored answer", s.hiddenByAI === 1, JSON.stringify(s));
+      check("threshold 0.85: hidden again from the stored answers", s.hiddenByAI === 3, JSON.stringify(s));
       await sleep(1500);
-      check("LC-1/LC-7: settings changes make no new AI requests", sent.length === before, `${before} → ${sent.length}: ${JSON.stringify(sent.slice(before).map((x) => x.header))}`);
+      check("settings changes make no new requests", sent.length === before, `${before} → ${sent.length}`);
 
-      // ---------- phase 3: only posts on screen are sent (SP-5) ----------
+      // ---------- phase 5: click to show ----------
+      unitOf("B").previousElementSibling.click();
+      await sleep(1200);
+      check("reveal: B shown with 'TypeSafe · ad (95%) · 42 ms, shown on request'", hiddenAs("B") === "revealed" && badgeOf("B") === "TypeSafe · ad (95%) · 42 ms, shown on request", `${hiddenAs("B")} / ${badgeOf("B")}`);
+
+      // ---------- phase 6: lookahead — up to 2 screens below the window is sent before it is seen ----------
+      const vh = window.innerHeight;
+      const scrollAndNotify = (y) => {
+        window.scrollTo(0, y);
+        if (HIDDEN_PAGE) window.dispatchEvent(new Event("scroll")); // hidden pages dispatch no scroll events
+      };
       feed.innerHTML = "";
-      document.getElementById("spacer").style.height = `${window.innerHeight + 150}px`;
-      feed.innerHTML = unit(`<div aria-posinset="7"><h3><a href="/cafe">Below Fold Cafe</a></h3><div data-ad-preview="message">Our new menu is out, come and try it this weekend</div></div>`);
-      await sleep(1800);
-      check("SP-5: post 150 px below the window is not sent", sentFor("Below Fold Cafe").length === 0);
-      window.scrollTo(0, document.body.scrollHeight);
-      await sleep(1800);
-      check("SP-5: sent once scrolled into view", sentFor("Below Fold Cafe").length === 1);
+      document.getElementById("spacer").style.height = `${vh + 200}px`;
+      feed.innerHTML = post({ id: "L", author: "Below Fold Cafe", message: "Our new menu is out, come and try it this weekend" }) +
+        `<div style="height:${Math.round(2.5 * vh)}px"></div>` +
+        post({ id: "M", author: "Far Below Bakery", message: "Sourdough workshop next month, two places left" });
+      await sleep(2500);
+      const lTop = unitOf("L").getBoundingClientRect().top;
+      check("within 2 screens below the window: sent before it is visible, badge 'not an ad (5%) · 42 ms'",
+        sentFor("Below Fold Cafe").length === 1 && lTop >= window.innerHeight && badgeOf("L") === "TypeSafe · not an ad (5%) · 42 ms",
+        `${sentFor("Below Fold Cafe").length} / top ${Math.round(lTop)} vs ${window.innerHeight} / ${badgeOf("L")}`);
+      check("lookahead request (below the window) sent with urgent=false", urgentFor("Below Fold Cafe")[0] === false, JSON.stringify(urgentFor("Below Fold Cafe")));
+      check("beyond the lookahead (> 2 screens below): not sent, badge 'checking…'",
+        sentFor("Far Below Bakery").length === 0 && badgeOf("M") === "TypeSafe · checking…", `${sentFor("Far Below Bakery").length} / ${badgeOf("M")}`);
+      scrollAndNotify(unitOf("M").getBoundingClientRect().top + window.scrollY - 2 * vh); // M one screen below the window
+      await sleep(2500);
+      const mTop = unitOf("M").getBoundingClientRect().top;
+      check("scrolled to within the lookahead: sent once, while still below the window",
+        sentFor("Far Below Bakery").length === 1 && mTop >= window.innerHeight, `${sentFor("Far Below Bakery").length} / top ${Math.round(mTop)}`);
+      scrollAndNotify(document.body.scrollHeight);
+      await sleep(1500);
+      check("scrolled into view: no new request", sentFor("Below Fold Cafe").length === 1 && sentFor("Far Below Bakery").length === 1,
+        `${sentFor("Below Fold Cafe").length} / ${sentFor("Far Below Bakery").length}`);
       window.scrollTo(0, 0);
       document.getElementById("spacer").style.height = "0";
 
-      // ---------- phase 4: temporary error is retried (mv3-3 / LC-5) ----------
-      feed.innerHTML = unit(`<div aria-posinset="8"><h3><a href="/bakery">Rate Limited Bakery</a></h3><div data-ad-preview="message">Fresh croissants every morning from 7 am</div></div>`);
-      await sleep(4000);
-      check("mv3-3: rate-limited post asked again after the pause", sentFor("Rate Limited Bakery").length === 2, String(sentFor("Rate Limited Bakery").length));
+      // ---------- phase 6b: hold gate ----------
+      feed.innerHTML = "";
+      document.body.insertAdjacentHTML("beforeend", `<div class="portal"><span id="_r_20_">Ad</span></div>`); // label known from the first look
+      gate("Held Shop");
+      gate("Slow Friend");
+      let oEverHeld = false;
+      feed.innerHTML = post({ id: "N", author: "Held Shop", labelId: "_r_20_", message: "Spring sale on all garden tools" }) +
+        post({ id: "O", author: "Slow Friend", message: "Lovely walk by the river with the kids today" });
+      await until(() => {
+        oEverHeld ||= hiddenAs("O") !== null || placeholderOf("O") !== null;
+        return sentFor("Held Shop").length === 1 && sentFor("Slow Friend").length === 1;
+      }, 3000);
+      check("hold: labelled post in the window, answer pending → 'Checking with TypeSafe…', data-fbah-hidden=hold",
+        hiddenAs("N") === "hold" && placeholderOf("N") === "Checking with TypeSafe…", `${hiddenAs("N")} / ${placeholderOf("N")}`);
+      s = await stats();
+      check("hold: a held post is not counted as hidden", s.hiddenCount === 0 && s.hiddenByAI === 0 && s.hiddenByRules === 0, JSON.stringify(s));
+      oEverHeld ||= hiddenAs("O") !== null || placeholderOf("O") !== null;
+      check("hold: unlabelled organic post (no button) is never held, badge 'checking…' while pending",
+        !oEverHeld && sentFor("Slow Friend").length === 1 && badgeOf("O") === "TypeSafe · checking…", `${oEverHeld} / ${badgeOf("O")}`);
+      openGate("Held Shop");
+      openGate("Slow Friend");
+      await sleep(800);
+      check("hold → 'ad' answer: hidden placeholder 'Ad hidden by TypeSafe (95%) · 42 ms — click to show'",
+        hiddenAs("N") === "AI" && placeholderOf("N") === "Ad hidden by TypeSafe (95%) · 42 ms — click to show", `${hiddenAs("N")} / ${placeholderOf("N")}`);
+      check("organic answer: visible with 'TypeSafe · not an ad (5%) · 42 ms'", hiddenAs("O") === null && badgeOf("O") === "TypeSafe · not an ad (5%) · 42 ms", badgeOf("O"));
 
-      // ---------- phase 5: no key → silent until the background says resume (LC-5) ----------
+      gate("Never Answer Store"); // opened only after the release check
+      document.body.insertAdjacentHTML("beforeend", `<div class="portal"><span id="_r_21_">Ad</span></div>`);
+      feed.insertAdjacentHTML("afterbegin", post({ id: "P", author: "Never Answer Store", labelId: "_r_21_", message: "Flash sale ends tonight at midnight" }));
+      await until(() => hiddenAs("P") === "hold", 2000);
+      check("hold: held while the stub does not answer", hiddenAs("P") === "hold" && placeholderOf("P") === "Checking with TypeSafe…", `${hiddenAs("P")} / ${placeholderOf("P")}`);
+      await sleep(4600);
+      check("hold released after 4 s without an answer: shown, badge 'TypeSafe · still checking…'",
+        sentFor("Never Answer Store").length === 1 && hiddenAs("P") === null && placeholderOf("P") === null && badgeOf("P") === "TypeSafe · still checking…",
+        `${sentFor("Never Answer Store").length} / ${hiddenAs("P")} / ${badgeOf("P")}`);
+      openGate("Never Answer Store");
+      await sleep(800);
+      check("a late 'ad' answer after the release still hides the post", hiddenAs("P") === "AI", hiddenAs("P"));
+
+      feed.insertAdjacentHTML("beforeend", post({ id: "Q", author: "Cached Corner", message: "Same post as yesterday, already classified" }));
+      await sleep(1500);
+      check("worker cache hit: badge 'TypeSafe · not an ad (5%) · cached'", badgeOf("Q") === "TypeSafe · not an ad (5%) · cached", badgeOf("Q"));
+
+      feed.insertAdjacentHTML("beforeend",
+        post({ id: "Q2", author: "Batch Bistro", message: "Soup of the day: pumpkin and chestnut" }) +
+        post({ id: "Q3", author: "Batch Boutique", message: "Winter coats, 30% off this week", cta: "Shop now" }));
+      await sleep(1500);
+      check("answer from a batch: badge 'TypeSafe · not an ad (5%) · 42 ms · batch of 5'",
+        badgeOf("Q2") === "TypeSafe · not an ad (5%) · 42 ms · batch of 5", badgeOf("Q2"));
+      check("ad answered in a batch: placeholder 'Ad hidden by TypeSafe (95%) · 42 ms · batch of 5 — click to show'",
+        hiddenAs("Q3") === "AI" && placeholderOf("Q3") === "Ad hidden by TypeSafe (95%) · 42 ms · batch of 5 — click to show", placeholderOf("Q3"));
+
+      // ---------- phase 6c: held before it scrolls into view; the 4 s count starts inside the window; a reveal is kept ----------
+      feed.innerHTML = "";
+      document.getElementById("spacer").style.height = `${vh + 100}px`; // the post starts about 100 px below the window
+      document.body.insertAdjacentHTML("beforeend", `<div class="portal"><span id="_r_22_">Ad</span></div>`);
+      gate("Prehold Shop");
+      feed.innerHTML = post({ id: "R", author: "Prehold Shop", labelId: "_r_22_", message: "Garden furniture clearance, everything must go" });
+      await until(() => sentFor("Prehold Shop").length === 1 && hiddenAs("R") === "hold", 3000);
+      const rBox = () => unitOf("R")?.previousElementSibling?.getBoundingClientRect() ?? null;
+      const rTop = rBox()?.top ?? -1;
+      check("pre-hold: labelled post just below the window, answer pending → 'Checking with TypeSafe…' before it is visible; request urgent=false",
+        hiddenAs("R") === "hold" && placeholderOf("R") === "Checking with TypeSafe…" && rTop >= window.innerHeight && urgentFor("Prehold Shop")[0] === false,
+        `${hiddenAs("R")} / ${placeholderOf("R")} / top ${Math.round(rTop)} vs ${window.innerHeight} / ${JSON.stringify(urgentFor("Prehold Shop"))}`);
+      await sleep(4600);
+      check("pre-hold: still held after 4.6 s below the window (the 4 s count has not started)", hiddenAs("R") === "hold", hiddenAs("R"));
+      scrollAndNotify(document.body.scrollHeight);
+      await sleep(1000);
+      const rIn = rBox();
+      check("pre-hold: scrolled into view → placeholder inside the window, still held 1 s later",
+        hiddenAs("R") === "hold" && rIn !== null && rIn.top < window.innerHeight && rIn.bottom > 0,
+        `${hiddenAs("R")} / ${rIn && Math.round(rIn.top)} vs ${window.innerHeight}`);
+      const rUrgent = JSON.stringify(urgentFor("Prehold Shop"));
+      check(HIDDEN_PAGE
+          ? "on screen in a hidden tab while its lookahead request waits: not promoted"
+          : "on screen while its lookahead request waits: sent again once as urgent (promotion), same post",
+        rUrgent === (HIDDEN_PAGE ? "[false]" : "[false,true]") && new Set(sentFor("Prehold Shop").map((x) => JSON.stringify(x))).size === 1,
+        rUrgent);
+      unitOf("R").previousElementSibling.click();
+      await sleep(300);
+      check("click during a hold: shown with 'TypeSafe · checking…, shown on request'",
+        hiddenAs("R") === "revealed" && badgeOf("R") === "TypeSafe · checking…, shown on request", `${hiddenAs("R")} / ${badgeOf("R")}`);
+      await sleep(4000);
+      check("hold released 4 s after entering the window: 'TypeSafe · still checking…'",
+        hiddenAs("R") === null && badgeOf("R") === "TypeSafe · still checking…", `${hiddenAs("R")} / ${badgeOf("R")}`);
+      openGate("Prehold Shop");
+      await sleep(800);
+      check("an 'ad' answer after the release keeps the post the user opened visible ('…, shown on request')",
+        hiddenAs("R") === "revealed" && badgeOf("R") === "TypeSafe · ad (95%) · 42 ms, shown on request", `${hiddenAs("R")} / ${badgeOf("R")}`);
+      window.scrollTo(0, 0);
+      document.getElementById("spacer").style.height = "0";
+
+      // ---------- phase 6d: a full worker queue ("busy") delays only the post turned away ----------
+      busyFor.add("Busy Lookahead Shop");
+      feed.innerHTML = "";
+      document.getElementById("spacer").style.height = `${vh + 100}px`; // S starts about 100 px below the window
+      feed.innerHTML = post({ id: "S", author: "Busy Lookahead Shop", message: "Garden gnomes, two for the price of one" });
+      await until(() => badgeOf("S") === "TypeSafe · error: too many posts queued, retrying", 3000);
+      check("busy: lookahead request turned away → badge 'TypeSafe · error: too many posts queued, retrying'",
+        urgentFor("Busy Lookahead Shop")[0] === false && badgeOf("S") === "TypeSafe · error: too many posts queued, retrying",
+        `${JSON.stringify(urgentFor("Busy Lookahead Shop"))} / ${badgeOf("S")}`);
+      const busyAt = busyAnsweredAt;
+      document.getElementById("spacer").style.height = "0"; // S comes into the window, below T
+      feed.insertAdjacentHTML("afterbegin", post({ id: "T", author: "On Screen Neighbour", message: "Picnic in the park this Sunday, bring a blanket" }));
+      await until(() => sentFor("On Screen Neighbour").length === 1, 1500);
+      const tSent = firstSentAt.get("On Screen Neighbour") ?? Infinity;
+      check("busy does not pause the tab: another post is sent before the post's 5 s wait ends",
+        sentFor("On Screen Neighbour").length === 1 && tSent - busyAt < 5000, `${sentFor("On Screen Neighbour").length} / ${tSent - busyAt} ms`);
+      if (!HIDDEN_PAGE) {
+        await until(() => badgeOf("S") === "TypeSafe · not an ad (5%) · 42 ms", 1500);
+        check("busy lookahead post now on screen in the visible tab: sent at once as urgent, answered",
+          JSON.stringify(urgentFor("Busy Lookahead Shop")) === "[false,true]" && badgeOf("S") === "TypeSafe · not an ad (5%) · 42 ms",
+          `${JSON.stringify(urgentFor("Busy Lookahead Shop"))} / ${badgeOf("S")}`);
+      }
+      busyFor.delete("Busy Lookahead Shop");
+
+      // ---------- phase 7: transient failures → 3 attempts, then the local rule ----------
+      failFor.add("Timeout Shop");
+      feed.innerHTML = post({ id: "F", author: "Timeout Shop", labelId: "_r_5_", message: "Big discounts on garden furniture" });
+      portalLabel("_r_5_", 0);
+      await sleep(6000);
+      check("F: exactly 3 attempts", sentFor("Timeout Shop").length === 3, String(sentFor("Timeout Shop").length));
+      check("F: labelled → hidden by rules after the failures", hiddenAs("F") === "rules" && placeholderOf("F") === "Ad hidden by rules (AI failed 3 times: timeout) — click to show", `${hiddenAs("F")} / ${placeholderOf("F")}`);
+      await sleep(2500);
+      check("F: no fourth attempt", sentFor("Timeout Shop").length === 3);
+
+      // ---------- phase 8: no key → the local rule decides, visibly ----------
       mode = "no_key";
-      feed.innerHTML = unit(`<div aria-posinset="9"><h3><a href="/keyless">Keyless Post</a></h3><div data-ad-preview="message">This post was seen before any key was saved</div></div>`);
-      await sleep(1800);
-      const n1 = sentFor("Keyless Post").length;
-      feed.insertAdjacentHTML("beforeend", unit(`<div aria-posinset="10"><h3><a href="/other">Second Keyless</a></h3><div data-ad-preview="message">Another post while there is still no key</div></div>`));
-      await sleep(1800);
-      check("LC-5: no_key suspends AI calls (no probing)", n1 === 1 && sentFor("Second Keyless").length === 0, `${n1} / ${sentFor("Second Keyless").length}`);
+      const n0 = sent.length;
+      feed.innerHTML = post({ id: "G", author: "Keyless Brand", labelId: "_r_6_", message: "Try our new energy drink" }) +
+        post({ id: "H", author: "Keyless Friend", message: "Photos from our hike last Sunday" });
+      portalLabel("_r_6_", 0);
+      await sleep(3500);
+      check("no_key: at most 2 requests (the first answer stops the others)", sent.length - n0 <= 2 && sent.length - n0 >= 1, String(sent.length - n0));
+      check("no_key: labelled G hidden by rules with the reason", placeholderOf("G") === "Ad hidden by rules (AI unavailable: no API key) — click to show", placeholderOf("G"));
+      check("no_key: H visible with 'Rules · AI unavailable: no API key'", hiddenAs("H") === null && badgeOf("H") === "Rules · AI unavailable: no API key", badgeOf("H"));
+      const n1 = sent.length;
+      feed.insertAdjacentHTML("beforeend", post({ id: "I", author: "Keyless Cousin", message: "Look at this sunset over the lake" }));
+      await sleep(2500);
+      check("no_key: a new post gets the rule without any request", sent.length === n1 && badgeOf("I") === "Rules · AI unavailable: no API key", `${sent.length - n1} / ${badgeOf("I")}`);
+      await sleep(800);
+      check("chip: 'TypeSafe: no API key — click to open settings'", chipText() === "Ad Hider · TypeSafe: no API key — click to open settings", chipText());
+      document.querySelector("body > .fbah-chip").click();
+      await sleep(300);
+      check("chip click sends fbah/openOptions", optionsOpened === 1, String(optionsOpened));
+
       mode = "ok";
       const resumed = await new Promise((r) => messageListener({ type: "fbah/aiResume" }, { id: "mock-ext" }, r));
-      await sleep(1800);
-      check("LC-5: aiResume → both posts classified", resumed.resumed === true && sentFor("Keyless Post").length === 2 && sentFor("Second Keyless").length === 1,
-        `${sentFor("Keyless Post").length} / ${sentFor("Second Keyless").length}`);
+      await sleep(3000);
+      check("aiResume: unlabelled posts asked again → 'not an ad'", resumed.resumed === true && badgeOf("H") === "TypeSafe · not an ad (5%) · 42 ms" && badgeOf("I") === "TypeSafe · not an ad (5%) · 42 ms", `${badgeOf("H")} / ${badgeOf("I")}`);
+      check("aiResume: labelled G stays hidden by rules, not re-sent", hiddenAs("G") === "rules" && sentFor("Keyless Brand").length <= 1, `${hiddenAs("G")} / ${sentFor("Keyless Brand").length}`);
       const fake = await new Promise((r) => { const x = messageListener({ type: "fbah/aiResume" }, { id: "someone-else" }, r); if (x === false) setTimeout(() => r("ignored"), 50); });
       check("aiResume from another sender id is ignored", fake === "ignored");
+
+      // ---------- phase 9: badges off, then rules only ----------
+      changeSettings({ showAIBadges: false });
+      await sleep(600);
+      check("showAIBadges off: no badge, no chip", document.querySelectorAll(".fbah-badge").length === 0 && chipText() === null);
+      changeSettings({ showAIBadges: true, aiEnabled: false });
+      const n2 = sent.length;
+      feed.innerHTML = post({ id: "J", author: "Rules Brand", labelId: "_r_7_", message: "Discover our spring collection" }) +
+        post({ ...C, id: "K", author: "Rules Unlabelled Shop" });
+      portalLabel("_r_7_", 0);
+      await sleep(2500);
+      check("rules only: labelled post hidden 'sponsored'", hiddenAs("J") === "sponsored" && placeholderOf("J") === "Ad hidden by rules (Sponsored label) — click to show", `${hiddenAs("J")} / ${placeholderOf("J")}`);
+      check("rules only: unlabelled ad stays visible, no badges, no requests", hiddenAs("K") === null && document.querySelectorAll(".fbah-badge").length === 0 && sent.length === n2);
+      check("rules only: chip says 'TypeSafe: off'", chipText() === "Ad Hider · TypeSafe: off", chipText());
 
       render(true);
       document.title = failures === 0 ? "Mock Feed Check: PASS" : "Mock Feed Check: FAIL";

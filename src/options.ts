@@ -1,5 +1,6 @@
 // Options page: TypeSafe API key (chrome.storage.local, written directly here,
-// never synced), AI threshold and daily cap (chrome.storage.sync settings).
+// never synced), AI threshold and daily cap (chrome.storage.sync settings), and
+// "Clear TypeSafe cache" (asks the background worker; answers only, never the key).
 
 (() => {
   function $<T extends HTMLElement>(id: string, ctor: new () => T): T {
@@ -21,6 +22,8 @@
   const capEl = $("cap", HTMLInputElement);
   const usageEl = $("usage", HTMLSpanElement);
   const lastErrorEl = $("last-error", HTMLParagraphElement);
+  const clearCacheBtn = $("clear-cache", HTMLButtonElement);
+  const cacheMsgEl = $("cache-msg", HTMLParagraphElement);
 
   let settings: FBAHSettings = { ...FBAH_DEFAULT_SETTINGS };
 
@@ -37,6 +40,16 @@
 
   function masked(key: string): string {
     return `••••••••${key.slice(-4)}`;
+  }
+
+  /** "Test key" result, naming the check the background used (models list, or a classification call). */
+  function testKeyText(res: FBAHTestKeyResult): string {
+    if (!res.ok) return res.method === undefined ? res.message : `${res.message} (checked with the ${res.method})`;
+    if (res.method === "models list") {
+      const model = res.model === "" ? "" : `, ${res.model} available`;
+      return `Key works (checked with the models list${model}): TypeSafe answered in ${res.latencyMs} ms.`;
+    }
+    return `Key works (checked with a classification call): ${res.model} answered in ${res.latencyMs} ms.`;
   }
 
   async function refreshStatus(): Promise<void> {
@@ -128,8 +141,7 @@
       try {
         const res = await fbahSendToBackground({ type: "fbah/testKey" });
         if (typeof res !== "object" || res === null) say(keyMsgEl, "No answer from the background worker.", "bad");
-        else if (res.ok) say(keyMsgEl, `Key works: ${res.model} answered in ${res.latencyMs} ms.`, "ok");
-        else say(keyMsgEl, res.message, "bad");
+        else say(keyMsgEl, testKeyText(res), res.ok ? "ok" : "bad");
       } catch {
         say(keyMsgEl, "Could not reach the background worker; reload the extension.", "bad");
       } finally {
@@ -143,6 +155,22 @@
       await chrome.storage.local.remove(FBAH_API_KEY_STORAGE_KEY);
       say(keyMsgEl, "Key removed. AI detection is inactive.", "ok");
       await refreshStatus();
+    });
+
+    clearCacheBtn.addEventListener("click", async () => {
+      clearCacheBtn.disabled = true;
+      say(cacheMsgEl, "Clearing…");
+      try {
+        const res = await fbahSendToBackground({ type: "fbah/clearCache" });
+        if (typeof res !== "object" || res === null) say(cacheMsgEl, "No answer from the background worker.", "bad");
+        else if (!res.ok) say(cacheMsgEl, res.message, "bad");
+        else if (res.removed === 0) say(cacheMsgEl, "The cache was already empty.", "ok");
+        else say(cacheMsgEl, `Cleared ${res.removed} cached answer${res.removed === 1 ? "" : "s"}.`, "ok");
+      } catch {
+        say(cacheMsgEl, "Could not reach the background worker; reload the extension.", "bad");
+      } finally {
+        clearCacheBtn.disabled = false;
+      }
     });
 
     aiEnabledEl.addEventListener("change", () => void saveSettings({ aiEnabled: aiEnabledEl.checked }));

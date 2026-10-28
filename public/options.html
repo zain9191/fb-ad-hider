@@ -43,12 +43,12 @@
 <body>
   <main>
     <h1>AI detection</h1>
-    <p class="sub">Facebook Ad Hider can ask TypeSafe AI (model Jev) about feed posts that its local rules can't classify.</p>
+    <p class="sub">TypeSafe AI (model Jev) decides which feed posts are ads. Facebook's own "Ad" label is one of the signals it gets. Without a working key, the local rules decide.</p>
 
     <section class="notice" aria-labelledby="privacy-h">
       <h2 id="privacy-h">Privacy</h2>
-      <p>When AI detection is on, the text of posts that local rules can't classify is sent to TypeSafe AI (api.typesafe.ai) for classification.</p>
-      <p class="muted">Only posts that stay on your screen for about a second are sent (not posts below it), normally once per browser session; a post can be sent again after a temporary error such as a rate limit. What is sent: the post's message and link titles (up to 1,500 characters), the author's name, up to 5 outbound link hostnames (no full URLs), whether an ad-style button is shown, and the page language. Comments, reactions, the names of people who reacted, counters, the timestamp and your Facebook cookies are left out. Posts that the local rules recognise as ads or as "Suggested for you" are never sent.</p>
+      <p>When AI detection is on, the text of feed posts on your screen or up to about two screens ahead is sent to TypeSafe AI (api.typesafe.ai) for classification.</p>
+      <p class="muted">Facebook prepares posts before you reach them, and the extension classifies them in advance so that ads are hidden before you see them: a post is sent once it is on your screen, up to about two screens below it or one screen above it, and its content has stopped changing for about 0.3 s. Posts that are not on your screen are sent together, up to 5 in one request; posts on your screen are normally sent alone (a post whose group request had already started when it reached your screen gets that request's answer). A post Facebook has prepared can therefore be sent even if you stop scrolling before reaching it; posts further away are not sent. Answers are kept in this browser for 7 days (see "Answer cache" below), so a post you see again is normally not sent again. A post is sent at most 3 times per page: again after a temporary error such as a rate limit, and once more if Facebook's "Ad" label shows up after a "not an ad" answer. What is sent: the post's message plus the title and description of its link preview (up to 1,500 characters), the author's name, up to 5 hostnames (the link-preview domain and outbound links, no full URLs), whether an ad-style button is shown and its text, whether Facebook's "Ad" label was found, and the page language. Comments, reactions, the names of people who reacted or were tagged, counters, the timestamp and your Facebook cookies are left out. "Suggested for you" posts are never sent.</p>
     </section>
 
     <section aria-labelledby="key-h">
@@ -67,13 +67,15 @@
         <button id="remove-key" type="button">Remove</button>
       </div>
       <p id="key-msg" class="msg" role="status" aria-live="polite"></p>
+      <p class="muted">“Test key” first asks TypeSafe for its list of models (GET /v1/models). If TypeSafe has no such list, it sends a tiny classification request instead. While AI calls are paused after a rate limit, or when the key was refused for classification, the classification request is sent as well: only its success lifts the pause or the refusal. The result says which check was used. Each request counts in today's calls; TypeSafe's documentation does not say whether the models list uses tokens.</p>
       <p class="muted">Get a key at <a href="https://console.typesafe.ai/keys" target="_blank" rel="noopener noreferrer">console.typesafe.ai/keys</a>.
         The key is stored only in this browser (chrome.storage.local, not synced) and is used only by the extension's background worker.</p>
     </section>
 
     <section aria-labelledby="det-h">
       <h2 id="det-h">Detection</h2>
-      <label class="toggle">Use AI for posts the local rules can't classify <input id="aiEnabled" type="checkbox"></label>
+      <label class="toggle">Let TypeSafe AI decide which feed posts are ads <input id="aiEnabled" type="checkbox"></label>
+      <p class="muted">Off: only Facebook's own "Ad" / "Sponsored" label hides a post (local rules, no network call).</p>
       <div class="field">
         <label for="threshold">Hide when the ad probability is at least</label>
         <div class="row"><input id="threshold" type="range" min="0.5" max="0.99" step="0.01"><output id="threshold-out" for="threshold"></output></div>
@@ -82,9 +84,19 @@
       <div class="field">
         <label for="cap">Maximum TypeSafe calls per day</label>
         <div class="row"><input id="cap" type="number" min="1" max="10000" step="1"><span id="usage" class="muted"></span></div>
-        <p class="muted">When the cap is reached, the extension stops calling TypeSafe until midnight (local time); local rules keep working. TypeSafe bills per input token: see <a href="https://docs.typesafe.ai/models" target="_blank" rel="noopener noreferrer">docs.typesafe.ai/models</a> for current pricing.</p>
+        <p class="muted">When the cap is reached, the extension stops calling TypeSafe until midnight (local time); local rules keep working. A batch of up to 5 posts ahead of your screen counts as one call (it may use more tokens than a single call). TypeSafe bills per input token: see <a href="https://docs.typesafe.ai/models" target="_blank" rel="noopener noreferrer">docs.typesafe.ai/models</a> for current pricing.</p>
       </div>
       <p id="last-error" class="msg"></p>
+    </section>
+
+    <section aria-labelledby="cache-h">
+      <h2 id="cache-h">Answer cache</h2>
+      <p class="muted">TypeSafe's answers are kept in this browser (chrome.storage.local, not synced) so that a post you have already seen, such as a repeated ad, is decided instantly and without a new call, even after a browser restart. Each entry holds only a fingerprint of the post (a SHA-256 hash, no post text), the probability, the time it was last used and, for an answer obtained in a batch, the version of the batch question. Someone with access to this browser profile who can rebuild a post's exact description could tell whether, and roughly when, it was classified. An answer not used for 7 days is deleted, and at most 3,000 are kept (the least recently used go first). While the browser is open, answers are also kept in its session storage, without these limits, until the browser closes.</p>
+      <div class="row">
+        <button id="clear-cache" type="button">Clear TypeSafe cache</button>
+      </div>
+      <p id="cache-msg" class="msg" role="status" aria-live="polite"></p>
+      <p class="muted">Removes the cached answers only, not your API key or today's call count. Open Facebook tabs keep the verdicts they already have until you reload them.</p>
     </section>
   </main>
   <script src="shared.js"></script>

@@ -1,0 +1,19 @@
+# Dependencies and build output (regenerable: npm ci && npm run build)
+node_modules/
+dist/
+build/
+.venv/
+venv/
+__pycache__/
+
+# Old nested copy, kept in history as the first commit (snapshot 2026-09-30)
+/fb-ad-hider/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# OS and logs
+.DS_Store
+*.log

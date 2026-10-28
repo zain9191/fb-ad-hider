@@ -13,6 +13,7 @@
     "hideReelsAndMarketplaceAds",
     "hideSuggested",
     "aiEnabled",
+    "showAIBadges",
   ];
 
   function $<T extends HTMLElement>(id: string, ctor: new () => T): T {
@@ -30,7 +31,7 @@
 
   let settings: FBAHSettings = { ...FBAH_DEFAULT_SETTINGS };
 
-  /** Posts without a stored AI verdict are asked about after a 0.8 s dwell plus a TypeSafe answer. */
+  /** Posts without a stored verdict are asked about once stable for 0.3 s, plus a TypeSafe answer. */
   const AI_SETTLE_MS = 2_500;
 
   function openOptions(): void {

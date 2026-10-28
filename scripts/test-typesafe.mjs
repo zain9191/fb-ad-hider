@@ -1,5 +1,5 @@
 // Tests for the TypeSafe client (dist/typesafe.js) against a local mock of
-// POST /v1/systemone. No dependencies, no network access, no real API key.
+// POST /v1/systemone and GET /v1/models. No dependencies, no network access, no real API key.
 //
 //   npm test      (= npm run build && node scripts/test-typesafe.mjs)
 //
@@ -18,8 +18,12 @@ const clientPath = new URL("../dist/typesafe.js", import.meta.url);
 const context = vm.createContext({ fetch, AbortController, setTimeout, clearTimeout, console, URL, TextEncoder });
 vm.runInContext(readFileSync(clientPath, "utf8"), context, { filename: "dist/typesafe.js" });
 const systemOne = vm.runInContext("typesafeSystemOne", context);
+const systemOnePartial = vm.runInContext("typesafeSystemOnePartial", context);
+const listModels = vm.runInContext("typesafeListModels", context);
 const DEFAULTS = vm.runInContext("TYPESAFE_DEFAULTS", context);
 assert.equal(typeof systemOne, "function", "dist/typesafe.js must define typesafeSystemOne");
+assert.equal(typeof systemOnePartial, "function", "dist/typesafe.js must define typesafeSystemOnePartial");
+assert.equal(typeof listModels, "function", "dist/typesafe.js must define typesafeListModels");
 
 // ---------- mock server ----------
 
@@ -66,11 +70,14 @@ const QUESTIONS = {
   },
 };
 
+// Same shape as FBAHPostState (the content script's post summary), sent unchanged as `state`.
 const STATE = {
-  text: "Summer sale: 40% off all sneakers. Shop now",
+  text: "Summer sale: 40% off all sneakers.",
   header: "Sneaker Shop",
   links: ["sneakers.example"],
   hasCallToActionButton: true,
+  ctaText: "Shop now",
+  hasAdLabel: true,
   language: "en",
 };
 
@@ -333,6 +340,127 @@ test("no key: invalid_key without sending anything", async () => {
   assert.equal(out.ok, false);
   assert.equal(out.error.code, "invalid_key");
   assert.equal(out.error.attempts, 0);
+  assert.equal(requests.length, 0);
+});
+
+// ---------- partial answers (several questions in one call) ----------
+
+test("partial answers: a missing or malformed answer drops only that answer", async () => {
+  handler = (res) =>
+    reply(res, 200, {
+      model: "jev-1.13.0",
+      answers: { q0: { type: "noul", noul: 0.9 }, q2: { type: "noul", noul: 3 } },
+      usage: { input_tokens: 1200, output_tokens: 30 },
+    });
+  const noul = (instructions) => ({ type: "noul", instructions });
+  const out = await systemOnePartial(fast, { state: { posts: [STATE, STATE, STATE] }, questions: { q0: noul("0?"), q1: noul("1?"), q2: noul("2?") } });
+  assert.equal(out.ok, true);
+  assert.deepEqual({ ...out.value.answers.q0 }, { type: "noul", noul: 0.9 });
+  assert.equal(out.value.answers.q1, undefined);
+  assert.equal(out.value.answers.q2, undefined);
+  assert.equal(out.value.answerErrors.q1, "answer is missing");
+  assert.match(out.value.answerErrors.q2, /not a probability/);
+  assert.equal(out.value.answerErrors.q0, undefined);
+  assert.equal(out.value.usage.inputTokens, 1200);
+  assert.deepEqual(JSON.parse(requests[0].body).state, { posts: [STATE, STATE, STATE] });
+
+  for (const payload of [{ model: "jev-1.13.0" }, "not json", [1]]) {
+    handler = (res) => reply(res, 200, payload);
+    const whole = await systemOnePartial(fast, { state: "x", questions: { q0: noul("0?") } });
+    assert.equal(whole.ok, false, JSON.stringify(payload));
+    assert.equal(whole.error.code, "bad_response", "no answers object at all: the whole call is bad_response");
+  }
+});
+
+// ---------- GET /v1/models ----------
+
+test("models list: GET /v1/models with the key and no body; parses an array, { models: [...] } and { data: [...] }", async () => {
+  const variants = [
+    [["jev-latest", "jev-1.13.0"], ["jev-latest", "jev-1.13.0"]],
+    [{ models: [{ id: "jev-latest" }, { name: "jev-1.13.0" }, 42, { other: true }, " "] }, ["jev-latest", "jev-1.13.0"]],
+    [{ object: "list", data: [{ id: "jev-1.13.0", object: "model" }, "jev-1.13.0"] }, ["jev-1.13.0"]],
+    [{ data: [] }, []],
+  ];
+  for (const [payload, expected] of variants) {
+    requests = [];
+    handler = (res) => reply(res, 200, payload, { "x-typesafe-request-id": "req_models" });
+    const out = await listModels(fast);
+    assert.equal(out.ok, true, JSON.stringify(payload));
+    assert.deepEqual([...out.value.models], expected, JSON.stringify(payload));
+    assert.equal(out.value.requestId, "req_models");
+    assert.equal(out.value.attempts, 1);
+    assert.equal(requests.length, 1);
+    const [r] = requests;
+    assert.equal(r.method, "GET");
+    assert.equal(r.url, "/v1/models");
+    assert.equal(r.headers.authorization, `Bearer ${FAKE_KEY}`);
+    assert.equal(r.headers.accept, "application/json");
+    assert.equal(r.headers["content-type"], undefined);
+    assert.equal(r.headers.cookie, undefined);
+    assert.equal(r.body, "");
+  }
+});
+
+test("models list: a 200 that is not a models list → bad_response (not the fallback signal)", async () => {
+  for (const payload of [{ model: "jev-1.13.0", answers: {} }, "<html>hi</html>", { models: "jev-latest" }]) {
+    requests = [];
+    handler = (res) => reply(res, 200, payload);
+    const out = await listModels(fast);
+    assert.equal(out.ok, false, JSON.stringify(payload));
+    assert.equal(out.error.code, "bad_response");
+    assert.equal(out.unsupported, false);
+    assert.equal(requests.length, 1, "not retried");
+  }
+});
+
+test("models list: 401 → invalid_key, no retry, key never echoed; 403 authentication_error → invalid_key", async () => {
+  handler = (res) =>
+    reply(res, 401, { detail: { error_type: "authentication_error", message: `Bad key ${FAKE_KEY}` } });
+  const out = await listModels(fast);
+  assert.equal(out.ok, false);
+  assert.equal(out.error.code, "invalid_key");
+  assert.equal(out.error.status, 401);
+  assert.equal(out.unsupported, false);
+  assert.equal(requests.length, 1);
+  assert.ok(!out.error.message.includes(FAKE_KEY), "API key must be redacted from messages");
+
+  requests = [];
+  handler = (res) => reply(res, 403, { detail: { error_type: "authentication_error", message: "Must supply an API key!" } });
+  const forbidden = await listModels(fast);
+  assert.equal(forbidden.error.code, "invalid_key");
+  assert.equal(forbidden.unsupported, false);
+  assert.equal(requests.length, 1);
+});
+
+test("models list: 404 / 405 → unsupported (the fallback signal), not retried; 5xx is retried and is not the signal", async () => {
+  for (const status of [404, 405]) {
+    requests = [];
+    handler = (res) => reply(res, status, { detail: "Not Found" });
+    const out = await listModels(fast);
+    assert.equal(out.ok, false);
+    assert.equal(out.unsupported, true, String(status));
+    assert.equal(out.error.status, status);
+    assert.equal(requests.length, 1, "not retried");
+  }
+  requests = [];
+  handler = (res) => reply(res, 500, { detail: "boom" });
+  const server = await listModels({ ...fast, maxRetries: 1 });
+  assert.equal(server.ok, false);
+  assert.equal(server.error.code, "server");
+  assert.equal(server.unsupported, false);
+  assert.equal(requests.length, 2, "retried like any call");
+});
+
+test("models list: timeout and no key behave like the other calls", async () => {
+  handler = (res) => hang(res);
+  const out = await listModels({ ...fast, timeoutMs: 100, maxRetries: 0 });
+  assert.equal(out.ok, false);
+  assert.equal(out.error.code, "timeout");
+  assert.equal(out.unsupported, false);
+  requests = [];
+  const none = await listModels({ ...fast, apiKey: "  " });
+  assert.equal(none.error.code, "invalid_key");
+  assert.equal(none.error.attempts, 0);
   assert.equal(requests.length, 0);
 });
 
