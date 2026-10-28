@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Facebook Ad Hider</title>
+  <style>
+    :root { color-scheme: light dark; --fg: #1c1e21; --muted: #65676b; --bg: #fff; --line: #e4e6eb; --accent: #1877f2; --ok: #31a24c; --warn: #e4a11b; --bad: #e41e3f; }
+    @media (prefers-color-scheme: dark) { :root { --fg: #e4e6eb; --muted: #b0b3b8; --bg: #242526; --line: #3a3b3c; --accent: #2d88ff; } }
+    body { margin: 0; width: 280px; font: 13px/1.4 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+    header { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+    h1 { margin: 0; font-size: 14px; }
+    #status, #counts { margin: 4px 0 0; color: var(--muted); }
+    #counts { margin-top: 0; font-size: 12px; }
+    section { padding: 8px 14px; }
+    label { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; gap: 8px; cursor: pointer; }
+    input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px; }
+    .main { font-weight: 600; border-bottom: 1px solid var(--line); margin-bottom: 4px; padding-bottom: 8px; }
+    .ai { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 8px; }
+    #ai-status { margin: 0 0 6px; color: var(--muted); display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; align-self: center; }
+    .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+    select, button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+    button { width: 100%; margin: 4px 0 10px; cursor: pointer; }
+    button:hover { border-color: var(--accent); }
+    button.link { width: auto; margin: 0; padding: 0; border: 0; color: var(--accent); text-decoration: underline; }
+    footer { padding: 0 14px 12px; text-align: right; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Facebook Ad Hider</h1>
+    <p id="status">…</p>
+    <p id="counts"></p>
+  </header>
+  <section>
+    <label class="main">Enabled <input type="checkbox" id="enabled"></label>
+    <label>Sponsored feed posts <input type="checkbox" id="hideFeedAds"></label>
+    <label>Right-column ads <input type="checkbox" id="hideRightRailAds"></label>
+    <label>Reels / Marketplace ads <input type="checkbox" id="hideReelsAndMarketplaceAds"></label>
+    <label>"Suggested for you" posts <input type="checkbox" id="hideSuggested"></label>
+    <label>When hidden
+      <select id="mode">
+        <option value="collapse">Show placeholder</option>
+        <option value="remove">Remove completely</option>
+      </select>
+    </label>
+    <div class="ai">
+      <label>AI detection (TypeSafe) <input type="checkbox" id="aiEnabled"></label>
+      <p id="ai-status" aria-live="polite">…</p>
+    </div>
+    <button id="rescan" type="button">Rescan this page</button>
+  </section>
+  <footer><button id="open-options" type="button" class="link">AI settings…</button></footer>
+  <script src="shared.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

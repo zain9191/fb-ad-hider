@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ad Hider AI Settings</title>
+  <style>
+    :root { color-scheme: light dark; --fg: #1c1e21; --muted: #65676b; --bg: #fff; --panel: #f7f8fa; --line: #e4e6eb; --accent: #1877f2; --ok: #31a24c; --warn: #b7791f; --bad: #e41e3f; }
+    @media (prefers-color-scheme: dark) { :root { --fg: #e4e6eb; --muted: #b0b3b8; --bg: #18191a; --panel: #242526; --line: #3a3b3c; --accent: #2d88ff; --warn: #e4a11b; --bad: #ff6b81; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 14px/1.5 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+    main { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { margin: 0 0 4px; font-size: 20px; }
+    h2 { margin: 0 0 10px; font-size: 15px; }
+    .sub { margin: 0 0 20px; color: var(--muted); }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+    p { margin: 0 0 10px; }
+    .muted { color: var(--muted); }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .grow { flex: 1 1 220px; min-width: 0; }
+    input[type="password"], input[type="text"], input[type="number"] {
+      font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; width: 100%;
+    }
+    input[type="number"] { width: 110px; }
+    input:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    input[type="checkbox"], input[type="range"] { accent-color: var(--accent); }
+    input[type="checkbox"] { width: 16px; height: 16px; }
+    input[type="range"] { flex: 1 1 200px; }
+    button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+    button:hover:not(:disabled) { border-color: var(--accent); }
+    button:disabled { opacity: .5; cursor: default; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    label.toggle { display: flex; justify-content: space-between; align-items: center; gap: 8px; cursor: pointer; font-weight: 600; }
+    .field { margin-top: 14px; }
+    .field > label { display: block; font-weight: 600; margin-bottom: 4px; }
+    output { font-variant-numeric: tabular-nums; min-width: 3.5em; text-align: right; }
+    .msg { min-height: 1.5em; margin: 10px 0 0; }
+    .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+    .notice { border-left: 3px solid var(--accent); }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>AI detection</h1>
+    <p class="sub">Facebook Ad Hider can ask TypeSafe AI (model Jev) about feed posts that its local rules can't classify.</p>
+
+    <section class="notice" aria-labelledby="privacy-h">
+      <h2 id="privacy-h">Privacy</h2>
+      <p>When AI detection is on, the text of posts that local rules can't classify is sent to TypeSafe AI (api.typesafe.ai) for classification.</p>
+      <p class="muted">Only posts that stay on your screen for about a second are sent (not posts below it), normally once per browser session; a post can be sent again after a temporary error such as a rate limit. What is sent: the post's message and link titles (up to 1,500 characters), the author's name, up to 5 outbound link hostnames (no full URLs), whether an ad-style button is shown, and the page language. Comments, reactions, the names of people who reacted, counters, the timestamp and your Facebook cookies are left out. Posts that the local rules recognise as ads or as "Suggested for you" are never sent.</p>
+    </section>
+
+    <section aria-labelledby="key-h">
+      <h2 id="key-h">TypeSafe API key</h2>
+      <p id="key-status" class="muted">…</p>
+      <div class="row">
+        <div class="grow">
+          <input id="api-key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off"
+                 placeholder="Paste your TypeSafe API key" aria-label="TypeSafe API key">
+        </div>
+        <button id="toggle-key" type="button" aria-pressed="false">Show</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="save-key" type="button" class="primary">Save</button>
+        <button id="test-key" type="button">Test key</button>
+        <button id="remove-key" type="button">Remove</button>
+      </div>
+      <p id="key-msg" class="msg" role="status" aria-live="polite"></p>
+      <p class="muted">Get a key at <a href="https://console.typesafe.ai/keys" target="_blank" rel="noopener noreferrer">console.typesafe.ai/keys</a>.
+        The key is stored only in this browser (chrome.storage.local, not synced) and is used only by the extension's background worker.</p>
+    </section>
+
+    <section aria-labelledby="det-h">
+      <h2 id="det-h">Detection</h2>
+      <label class="toggle">Use AI for posts the local rules can't classify <input id="aiEnabled" type="checkbox"></label>
+      <div class="field">
+        <label for="threshold">Hide when the ad probability is at least</label>
+        <div class="row"><input id="threshold" type="range" min="0.5" max="0.99" step="0.01"><output id="threshold-out" for="threshold"></output></div>
+        <p class="muted">Higher = fewer false positives (organic posts hidden by mistake), lower = more ads caught. Default 0.85.</p>
+      </div>
+      <div class="field">
+        <label for="cap">Maximum TypeSafe calls per day</label>
+        <div class="row"><input id="cap" type="number" min="1" max="10000" step="1"><span id="usage" class="muted"></span></div>
+        <p class="muted">When the cap is reached, the extension stops calling TypeSafe until midnight (local time); local rules keep working. TypeSafe bills per input token: see <a href="https://docs.typesafe.ai/models" target="_blank" rel="noopener noreferrer">docs.typesafe.ai/models</a> for current pricing.</p>
+      </div>
+      <p id="last-error" class="msg"></p>
+    </section>
+  </main>
+  <script src="shared.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

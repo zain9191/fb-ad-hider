@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mock Feed Check</title>
+  <!--
+    Browser check of dist/content.js against a mock Facebook feed (not real Facebook markup).
+    Run `npm run build`, then open this file in Chrome (file://…/scripts/mock-feed.html).
+    chrome.* is stubbed: nothing is sent anywhere. Results appear at the top of the page.
+  -->
+  <style>
+    :root { color-scheme: light dark; --fg: #1c1e21; --bg: #fff; --line: #ccd; --ok: #1a7f37; --bad: #c62828; }
+    @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --fg: #e4e6eb; --bg: #18191a; --line: #3a3b3c; --ok: #4ade80; --bad: #ff6b81; } }
+    :root[data-theme="dark"] { --fg: #e4e6eb; --bg: #18191a; --line: #3a3b3c; --ok: #4ade80; --bad: #ff6b81; }
+    body { margin: 0; padding: 8px 16px; font: 12px/1.3 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+    #results { position: sticky; top: 0; z-index: 1; margin: 0 0 8px; padding: 6px; max-height: 45vh; overflow: auto; background: var(--bg); border: 1px solid var(--line); white-space: pre-wrap; }
+    .pass { color: var(--ok); } .fail { color: var(--bad); }
+    [role="feed"] > div { border: 1px solid var(--line); margin: 2px 0; padding: 2px 6px; }
+    h3 { margin: 0; font-size: 12px; }
+    [role="article"] { margin-left: 12px; font-style: italic; }
+  </style>
+</head>
+<body>
+  <pre id="results" aria-live="polite">running…</pre>
+  <div id="spacer"></div>
+  <div role="feed" id="feed"></div>
+
+  <script>
+    // ---------- chrome.* stub ----------
+    const sent = [];
+    const syncListeners = [];
+    let messageListener = null;
+    let mode = "ok"; // "ok" | "no_key"
+    const answeredOnce = new Set();
+    window.chrome = {
+      runtime: {
+        id: "mock-ext",
+        onMessage: { addListener: (fn) => (messageListener = fn) },
+        async sendMessage(msg) {
+          if (msg.type !== "fbah/classify") return undefined;
+          sent.push(JSON.parse(JSON.stringify(msg.state)));
+          await new Promise((r) => setTimeout(r, 40));
+          const h = msg.state.header;
+          if (mode === "no_key") return { ok: false, error: "no_key", message: "No TypeSafe API key saved." };
+          if (h === "Rate Limited Bakery" && !answeredOnce.has(h)) {
+            answeredOnce.add(h);
+            return { ok: false, error: "rate_limited", message: "Paused", retryAfterMs: 1200 };
+          }
+          if (h === "Shop Ad Co") return { ok: true, probability: 0.95, cached: false };
+          return { ok: true, probability: 0.1, cached: false };
+        },
+      },
+      storage: {
+        sync: {
+          async get() { return { "fbah.settings": { aiEnabled: true, aiThreshold: 0.85, hideSuggested: false } }; },
+          onChanged: { addListener: (fn) => syncListeners.push(fn) },
+        },
+      },
+    };
+  </script>
+  <script>
+    // A hidden page (background tab, hidden preview pane) renders no frames, so the real
+    // IntersectionObserver never reports. Fall back to a layout-based stand-in there, and
+    // slow the checks down: Chrome aligns timers in hidden pages to 1 s.
+    const HIDDEN_PAGE = document.visibilityState === "hidden";
+    const SLOW = HIDDEN_PAGE ? 4 : 1;
+    if (HIDDEN_PAGE) {
+      window.IntersectionObserver = class {
+        constructor(cb) {
+          this.cb = cb;
+          this.targets = new Map();
+          setInterval(() => this.poll(), 100);
+        }
+        observe(el) { if (!this.targets.has(el)) this.targets.set(el, null); }
+        unobserve(el) { this.targets.delete(el); }
+        disconnect() { this.targets.clear(); }
+        takeRecords() { return []; }
+        poll() {
+          const entries = [];
+          for (const [el, prev] of this.targets) {
+            const r = el.getBoundingClientRect();
+            const visible = Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
+            const isIntersecting = visible > 0 && r.width > 0;
+            const intersectionRatio = r.height > 0 ? visible / r.height : 0;
+            const key = `${isIntersecting}:${intersectionRatio.toFixed(2)}`;
+            if (key === prev) continue;
+            this.targets.set(el, key);
+            entries.push({ target: el, isIntersecting, intersectionRatio });
+          }
+          if (entries.length > 0) this.cb(entries, this);
+        }
+      };
+    }
+  </script>
+  <script src="../dist/shared.js"></script>
+  <script src="../dist/content.js"></script>
+  <script>
+    // ---------- mock feed ----------
+    const feed = document.getElementById("feed");
+    const out = document.getElementById("results");
+    const lines = [];
+    let failures = 0;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms * SLOW));
+    function check(name, cond, detail = "") {
+      if (!cond) failures++;
+      lines.push(`${cond ? "PASS" : "FAIL"} ${name}${!cond && detail ? ` :: ${detail}` : ""}`);
+      render();
+    }
+    function render(done) {
+      out.innerHTML = lines.map((l) => `<span class="${l.startsWith("PASS") ? "pass" : "fail"}">${l.replace(/</g, "&lt;")}</span>`).join("\n") +
+        (done ? `\nDONE ${lines.length - failures}/${lines.length} passed (IntersectionObserver: ${HIDDEN_PAGE ? "layout stand-in, page hidden" : "native"})` : "");
+    }
+    const sentFor = (header) => sent.filter((s) => s.header === header);
+    function stats() {
+      return new Promise((resolve) => messageListener({ type: "fbah/getStats" }, { id: "mock-ext" }, resolve));
+    }
+    function changeSettings(patch) {
+      const newValue = { aiEnabled: true, aiThreshold: 0.85, hideSuggested: false, ...patch };
+      for (const fn of syncListeners) fn({ "fbah.settings": { newValue } }, "sync");
+    }
+    const unit = (inner) => `<div>${inner}</div>`; // [role=feed] > div
+
+    const PHASE1 = [
+      // SP-1 / SP-2 / F4: non-article post container holding comment articles, reactions, counters.
+      unit(`<div aria-posinset="1">
+        <div>Jean Dupont commented</div>
+        <h3><a href="/marie.dubois">Marie Dubois</a></h3>
+        <div><a href="#">12 min</a> · <span aria-label="Shared with Public"></span></div>
+        <div data-ad-preview="message" data-ad-comet-preview="message"><div dir="auto">Happy birthday Marie! Can't wait to see you next week</div><div role="button">See more</div></div>
+        <span role="toolbar" aria-label="See who reacted to this">👍❤️</span>
+        <div role="button"><span>Paul Martin and 23 others</span></div>
+        <div role="button">5 comments</div> <div role="button">Like</div>
+        <div role="article" aria-label="Comment by Alice Commenter">Alice Commenter <span dir="auto">SECRET labelled comment</span> <a href="https://comment.example/x">comment link</a> <span dir="auto">Sponsored</span></div>
+        <div role="article">Bob Unlabelled <span>SECRET unlabelled comment</span></div>
+      </div>`),
+      // SP-2 fallback path: no message container.
+      unit(`<div aria-posinset="2">
+        <h3><a href="/tram">Tram Fans Group</a></h3>
+        <div><span>3 h</span> · <span aria-label="Group"></span></div>
+        <div dir="auto">Interesting article about the new tram line</div>
+        <a href="https://l.facebook.com/l.php?u=https%3A%2F%2Fnews.example%2Ftram" role="link"><span>news.example</span><span>New tram line opens in May</span></a>
+        <div><span>12 comments</span> <span>Paul and 3 others</span> <span>42</span></div>
+      </div>`),
+      // LC-6: organic post linking to the Ad Library (facebook-internal, not wrapped in l.php).
+      unit(`<div aria-posinset="3">
+        <h3><a href="/friend">Friend Researcher</a></h3>
+        <div data-ad-preview="message">Look who is paying for these ads: <a href="https://www.facebook.com/ads/library/?id=123">https://www.facebook.com/ads/library/?id=123</a></div>
+      </div>`),
+      // LC-2: Suggested post, hideSuggested off.
+      unit(`<div aria-posinset="4">
+        <span>Suggested for you</span>
+        <h3><a href="/shop">Local Shop Suggested</a></h3>
+        <div data-ad-preview="message">Weekend sale -30%, Commander</div>
+      </div>`),
+      // Rules still work: ad-disclosure link.
+      unit(`<div aria-posinset="5">
+        <h3><a href="/brand">Real Ad Brand</a></h3>
+        <a href="/ads/about/?id=1"><span>Sponsored</span></a>
+        <div data-ad-preview="message">Buy our stuff</div>
+      </div>`),
+      // SP-3: the page pre-sets the old AI attribute to dodge classification.
+      unit(`<div aria-posinset="6" data-fbah-ai="0">
+        <h3><a href="/shopadco">Shop Ad Co</a></h3>
+        <div data-ad-preview="message" data-fbah-ai="0">Summer sale: 40% off all sneakers. Shop now</div>
+        <a href="https://l.facebook.com/l.php?u=https%3A%2F%2Fsneakers.example%2F" role="link"><div role="button">Shop now</div></a>
+      </div>`),
+    ];
+
+    async function run() {
+      await sleep(300);
+
+      // ---------- phase 1: extraction, privacy, rules ----------
+      feed.innerHTML = PHASE1.join("");
+      await sleep(2500);
+
+      const marie = sentFor("Marie Dubois");
+      check("SP-1: one request for wrapper + post container", marie.length === 1, JSON.stringify(sent.map((s) => s.header)));
+      const m = marie[0] ?? { text: "", links: [] };
+      check("SP-1: no comment text or comment links sent", !/SECRET|Alice|Bob|comment\.example/.test(JSON.stringify(sent)), JSON.stringify(m));
+      check("F4: header is the author name only", m.header === "Marie Dubois", m.header);
+      check("SP-2: text is the message only", m.text === "Happy birthday Marie! Can't wait to see you next week", m.text);
+      check("SP-2: no reaction names, counters, timestamp, social line", !/23 others|5 comments|12 min|Jean Dupont|See more|Like/.test(m.text), m.text);
+
+      const tram = sentFor("Tram Fans Group")[0] ?? { text: "", links: [] };
+      check("SP-2 fallback: body and link title kept", /new tram line/.test(tram.text) && /New tram line opens in May/.test(tram.text), tram.text);
+      check("SP-2 fallback: header, time, counters, 'others' dropped", !/Tram Fans Group|3 h|12 comments|3 others|42/.test(tram.text), tram.text);
+      check("links: l.php unwrapped", JSON.stringify(tram.links) === '["news.example"]', JSON.stringify(tram.links));
+
+      const friendUnit = feed.querySelector('[aria-posinset="3"]');
+      check("LC-6: Ad Library link is not a sponsored label", !friendUnit.hasAttribute("data-fbah-hidden"));
+      check("LC-6: 'Sponsored' text inside a comment does not hide the post", !feed.querySelector('[aria-posinset="1"]').hasAttribute("data-fbah-hidden"));
+      check("LC-6: organic post was sent to the AI instead", sentFor("Friend Researcher").length === 1);
+
+      check("LC-2: Suggested post not sent", sentFor("Local Shop Suggested").length === 0);
+      check("LC-2: Suggested post not hidden", !feed.querySelector('[aria-posinset="4"]').hasAttribute("data-fbah-hidden"));
+
+      const adUnit = feed.querySelector('[aria-posinset="5"]');
+      check("rules: /ads/about link hides the ad", adUnit.closest("[data-fbah-hidden]") !== null);
+      check("rules: rule-hidden ad not sent", sentFor("Real Ad Brand").length === 0);
+
+      check("SP-3: page-set data-fbah-ai does not exempt a post", sentFor("Shop Ad Co").length === 1);
+      const shop = feed.querySelector('[aria-posinset="6"]');
+      check("AI verdict 0.95 hides the post", shop.closest("[data-fbah-hidden]")?.getAttribute("data-fbah-hidden") === "AI");
+      const fbahAttrs = [...document.querySelectorAll("*")].flatMap((e) =>
+        [...e.attributes].filter((a) => a.name.startsWith("data-fbah") && a.name !== "data-fbah-hidden").map((a) => `${a.name}=${a.value}`));
+      check("SP-3: no AI state written to the DOM (only the page's own data-fbah-ai=0)", fbahAttrs.every((a) => a === "data-fbah-ai=0"), fbahAttrs.join(", "));
+
+      // ---------- phase 2: settings change re-evaluates locally (LC-7) ----------
+      const before = sent.length;
+      changeSettings({ aiThreshold: 0.9 });
+      let s = await stats();
+      check("LC-7: AI-hidden post stays hidden right after a settings change", shop.closest("[data-fbah-hidden]") !== null && s.hiddenByAI === 1, JSON.stringify(s));
+      changeSettings({ aiThreshold: 0.99 });
+      s = await stats();
+      check("LC-7: raising the threshold above p un-hides it at once", shop.closest("[data-fbah-hidden]") === null && s.hiddenByAI === 0, JSON.stringify(s));
+      changeSettings({ aiThreshold: 0.85 });
+      s = await stats();
+      check("LC-7: lowering it again re-hides from the stored answer", s.hiddenByAI === 1, JSON.stringify(s));
+      await sleep(1500);
+      check("LC-1/LC-7: settings changes make no new AI requests", sent.length === before, `${before} → ${sent.length}: ${JSON.stringify(sent.slice(before).map((x) => x.header))}`);
+
+      // ---------- phase 3: only posts on screen are sent (SP-5) ----------
+      feed.innerHTML = "";
+      document.getElementById("spacer").style.height = `${window.innerHeight + 150}px`;
+      feed.innerHTML = unit(`<div aria-posinset="7"><h3><a href="/cafe">Below Fold Cafe</a></h3><div data-ad-preview="message">Our new menu is out, come and try it this weekend</div></div>`);
+      await sleep(1800);
+      check("SP-5: post 150 px below the window is not sent", sentFor("Below Fold Cafe").length === 0);
+      window.scrollTo(0, document.body.scrollHeight);
+      await sleep(1800);
+      check("SP-5: sent once scrolled into view", sentFor("Below Fold Cafe").length === 1);
+      window.scrollTo(0, 0);
+      document.getElementById("spacer").style.height = "0";
+
+      // ---------- phase 4: temporary error is retried (mv3-3 / LC-5) ----------
+      feed.innerHTML = unit(`<div aria-posinset="8"><h3><a href="/bakery">Rate Limited Bakery</a></h3><div data-ad-preview="message">Fresh croissants every morning from 7 am</div></div>`);
+      await sleep(4000);
+      check("mv3-3: rate-limited post asked again after the pause", sentFor("Rate Limited Bakery").length === 2, String(sentFor("Rate Limited Bakery").length));
+
+      // ---------- phase 5: no key → silent until the background says resume (LC-5) ----------
+      mode = "no_key";
+      feed.innerHTML = unit(`<div aria-posinset="9"><h3><a href="/keyless">Keyless Post</a></h3><div data-ad-preview="message">This post was seen before any key was saved</div></div>`);
+      await sleep(1800);
+      const n1 = sentFor("Keyless Post").length;
+      feed.insertAdjacentHTML("beforeend", unit(`<div aria-posinset="10"><h3><a href="/other">Second Keyless</a></h3><div data-ad-preview="message">Another post while there is still no key</div></div>`));
+      await sleep(1800);
+      check("LC-5: no_key suspends AI calls (no probing)", n1 === 1 && sentFor("Second Keyless").length === 0, `${n1} / ${sentFor("Second Keyless").length}`);
+      mode = "ok";
+      const resumed = await new Promise((r) => messageListener({ type: "fbah/aiResume" }, { id: "mock-ext" }, r));
+      await sleep(1800);
+      check("LC-5: aiResume → both posts classified", resumed.resumed === true && sentFor("Keyless Post").length === 2 && sentFor("Second Keyless").length === 1,
+        `${sentFor("Keyless Post").length} / ${sentFor("Second Keyless").length}`);
+      const fake = await new Promise((r) => { const x = messageListener({ type: "fbah/aiResume" }, { id: "someone-else" }, r); if (x === false) setTimeout(() => r("ignored"), 50); });
+      check("aiResume from another sender id is ignored", fake === "ignored");
+
+      render(true);
+      document.title = failures === 0 ? "Mock Feed Check: PASS" : "Mock Feed Check: FAIL";
+    }
+    run().catch((e) => { lines.push(`FAIL harness error :: ${e && e.stack || e}`); failures++; render(true); });
+  </script>
+</body>
+</html>
