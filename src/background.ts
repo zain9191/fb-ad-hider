@@ -32,7 +32,8 @@
 //   - at most MAX_CONCURRENT API calls at a time, URGENT_RESERVED of them kept for posts inside the
 //     window of a visible tab ("urgent"), which also start before waiting lookahead batches;
 //     bounded wait queues
-//   - daily call cap (settings.aiDailyCap), counted per local calendar day in chrome.storage.local
+//   - optional daily call limit (settings.aiDailyLimit, 0 = none); calls are counted per local
+//     calendar day in chrome.storage.local either way
 //   - after a 401/403 the key is marked invalid and no call is made until the key changes
 //   - after a 429 / 529, calls pause for Retry-After (or a default delay). The pause is kept in
 //     chrome.storage.session, so it survives Chrome stopping and restarting this worker.
@@ -383,7 +384,7 @@
     await usage.update((u) => {
       const today = localDay();
       const calls = u.day === today ? u.calls : 0;
-      allowed = calls < cap;
+      allowed = cap === 0 || calls < cap; // 0 = no limit
       return { day: today, calls: allowed ? calls + 1 : calls };
     });
     return allowed;
@@ -840,10 +841,10 @@
     }
     const pausedNow = await activePause();
     if (pausedNow) return { ok: false, failure: pausedNow };
-    if (!(await reserveCall(settings.aiDailyCap))) {
+    if (!(await reserveCall(settings.aiDailyLimit))) {
       return {
         ok: false,
-        failure: failure("cap_reached", `Daily limit of ${settings.aiDailyCap} TypeSafe calls reached.`, msUntilLocalMidnight()),
+        failure: failure("cap_reached", `Daily limit of ${settings.aiDailyLimit} TypeSafe calls reached.`, msUntilLocalMidnight()),
       };
     }
     return { ok: true, key };
@@ -1129,7 +1130,7 @@
   async function aiStatus(): Promise<FBAHAIStatus> {
     const [settings, key, calls] = await Promise.all([getSettings(), getApiKey(), callsToday()]);
     const st = key ? await currentKeyStatus(key) : { keyValid: null, lastError: null };
-    return { hasKey: key !== null, keyValid: st.keyValid, callsToday: calls, cap: settings.aiDailyCap, lastError: st.lastError };
+    return { hasKey: key !== null, keyValid: st.keyValid, callsToday: calls, cap: settings.aiDailyLimit, lastError: st.lastError };
   }
 
   // ---------- toolbar badge: hidden posts per Facebook tab ----------
@@ -1239,7 +1240,7 @@
               hasKey: false,
               keyValid: null,
               callsToday: 0,
-              cap: FBAH_DEFAULT_SETTINGS.aiDailyCap,
+              cap: FBAH_DEFAULT_SETTINGS.aiDailyLimit,
               lastError: internalError(e).message,
             }),
           )

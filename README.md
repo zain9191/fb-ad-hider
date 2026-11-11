@@ -56,7 +56,7 @@ Without an API key nothing leaves the browser: no server, no tracking.
    refusal and lets the Facebook tabs resume. Each request counts in today's calls;
    TypeSafe's documentation does not say whether the models list uses tokens.
 4. Reload Facebook. The status chip at the bottom left reads
-   "Ad Hider · TypeSafe: Active · N/300 calls today · M hidden by AI", and every
+   "Ad Hider · TypeSafe: Active · N calls today · M hidden by AI", and every
    feed post gets a one-line verdict above it (see below). The popup shows the
    same status and the per-page counts split as "X by rules · Y by AI".
 
@@ -106,9 +106,9 @@ With "Show TypeSafe verdicts on posts" on (popup, default on):
   when it changes (at most every 300 ms); the badge is cleared when the tab loads a
   new page. No extra permission is needed (`chrome.action`, from the manifest's
   `action` key).
-- **Status chip** (bottom left): `TypeSafe: Active · 12/300 calls today · 3 hidden by AI`,
+- **Status chip** (bottom left): `TypeSafe: Active · 12 calls today · 3 hidden by AI` (`12/500` if you set a daily limit),
   `TypeSafe: no API key — click to open settings`, `TypeSafe: invalid key — click to fix`,
-  `TypeSafe: daily cap reached (300/300)` or `TypeSafe: off`. Hover it for the last
+  `TypeSafe: daily cap reached (500/500)` (only with a limit set) or `TypeSafe: off`. Hover it for the last
   TypeSafe error. Clicking it opens the options page. It refreshes every 15 s and
   after each answer.
 
@@ -294,9 +294,11 @@ scrolling before you reach it; posts further away cost nothing.
 - **Concurrency:** at most 4 TypeSafe calls at a time, 2 of them kept for posts on
   screen in the visible tab (see "Order" above), with bounded queues. This is best effort with respect to TypeSafe's rate limit (not verified by
   this extension); 429 / 529 answers still pause the calls (below).
-- **Daily cap:** default **300 calls per local calendar day**, adjustable in
-  Options. When it is reached, AI calls stop until midnight and the local rules keep
-  working. Each TypeSafe call counts once, including failed ones: a single-post
+- **Daily limit:** **none by default** (0 = no limit). You can set a maximum number of
+  calls per local calendar day in Options; when it is reached, AI calls stop until
+  midnight and the local rules keep working. The setting is `aiDailyLimit`; the former
+  `aiDailyCap` (default 300) is ignored, so an old saved 300 no longer applies. Calls are
+  counted either way (shown as "N calls today"). Each TypeSafe call counts once, including failed ones: a single-post
   call, a batch of up to 5 posts (plus one call per post when a refused batch is
   asked again post by post), and each request sent by "Test key" (1, or 2 when it
   falls back to, or confirms with, the classification call). The client's
@@ -321,8 +323,9 @@ Pricing (external, may change): TypeSafe's models page lists Jev 1.13 at
 $0.042 per million input tokens, and output tokens are free
 (https://docs.typesafe.ai/models, consulted 2026-09-28). The token count of
 one of this extension's requests (single post or batch) has not been measured. **Illustrative
-assumption:** at about 1,000 input tokens per call, 300 calls/day cost
-300 × 1,000 × 0.042 / 1,000,000 = $0.0126 per day, about $0.38 per 30 days.
+assumption:** at about 1,000 input tokens per call, 300 calls/day would cost
+300 × 1,000 × 0.042 / 1,000,000 = $0.0126 per day, about $0.38 per 30 days. With no
+daily limit, the cost follows how much you scroll.
 Check your usage in the TypeSafe console.
 
 ## Privacy
@@ -383,7 +386,7 @@ Key handling:
   extension's own pages.
 
 ## Structure
-- src/shared.ts     – typed settings (incl. aiEnabled / aiThreshold / aiDailyCap), storage helpers,
+- src/shared.ts     – typed settings (incl. aiEnabled / aiThreshold / aiDailyLimit), storage helpers,
                       post-state validation, typed message contract (FBAHMessage / FBAHResponses)
 - src/typesafe.ts   – typed TypeSafe System One client (noul / choice / score types, runtime response
                       validation, per-answer validation for batches, models list, retries, timeouts,
@@ -398,7 +401,7 @@ Key handling:
                       2026-layout post extraction, local rules (label signal / fallback / rules-only),
                       hiding, badges, status chip
 - src/popup.ts      – settings UI (incl. "Show TypeSafe verdicts on posts"), per-tab counters, AI status
-- src/options.ts    – API key (save / show / test / remove, with the check used), threshold, daily cap,
+- src/options.ts    – API key (save / show / test / remove, with the check used), threshold, optional daily limit,
                       Clear TypeSafe cache
 - public/           – manifest.json, popup.html, options.html
 - scripts/test-typesafe.mjs – Node test (no deps) of dist/typesafe.js against a mock /v1/systemone and

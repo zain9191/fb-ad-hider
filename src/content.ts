@@ -1486,12 +1486,12 @@
     const lastError = st.lastError ? `Last TypeSafe error: ${st.lastError}. ` : "";
     if (!st.hasKey) return { text: `${lead}no API key — click to open settings`, tone: "bad", title: `Posts are decided by the local rules. ${settingsHint}` };
     if (st.keyValid === false) return { text: `${lead}invalid key — click to fix`, tone: "bad", title: `${lastError}${settingsHint}` };
-    if (st.callsToday >= st.cap) {
+    if (st.cap > 0 && st.callsToday >= st.cap) {
       return { text: `${lead}daily cap reached (${st.callsToday}/${st.cap})`, tone: "warn", title: `The local rules decide until midnight. ${settingsHint}` };
     }
     const paused = Date.now() < pausedUntil ? ` · paused: ${pauseReason}` : "";
     return {
-      text: `${lead}Active · ${st.callsToday}/${st.cap} calls today · ${counts().hiddenByAI} hidden by AI${paused}`,
+      text: `${lead}Active · ${st.cap > 0 ? `${st.callsToday}/${st.cap}` : st.callsToday} calls today · ${counts().hiddenByAI} hidden by AI${paused}`,
       tone: paused ? "warn" : "ok",
       title: `${st.keyValid === null ? "Key not verified yet. " : ""}${lastError}${settingsHint}`,
     };

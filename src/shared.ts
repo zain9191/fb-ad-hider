@@ -29,15 +29,18 @@ interface FBAHSettings {
   aiEnabled: boolean;
   /** Hide a post when TypeSafe's "is this an ad" probability is >= this value. */
   aiThreshold: number;
-  /** Maximum TypeSafe API calls per local calendar day. */
-  aiDailyCap: number;
+  /**
+   * Maximum TypeSafe API calls per local calendar day; 0 = no limit (the default). Replaces the
+   * former `aiDailyCap` (default 300): a stored aiDailyCap is ignored, so the old limit is gone.
+   */
+  aiDailyLimit: number;
   /** Show a one-line verdict above each feed post and a status chip on facebook.com. */
   showAIBadges: boolean;
 }
 
 const FBAH_AI_THRESHOLD_MIN = 0.5;
 const FBAH_AI_THRESHOLD_MAX = 0.99;
-const FBAH_AI_CAP_MIN = 1;
+const FBAH_AI_CAP_MIN = 0; // 0 = no limit
 const FBAH_AI_CAP_MAX = 10_000;
 
 const FBAH_DEFAULT_SETTINGS: Readonly<FBAHSettings> = Object.freeze({
@@ -49,7 +52,7 @@ const FBAH_DEFAULT_SETTINGS: Readonly<FBAHSettings> = Object.freeze({
   mode: "collapse",
   aiEnabled: true,
   aiThreshold: 0.85,
-  aiDailyCap: 300,
+  aiDailyLimit: 0,
   showAIBadges: true,
 });
 
@@ -186,6 +189,7 @@ interface FBAHAIStatus {
   /** null = not verified yet (no successful or 401 answer since the key was set). */
   keyValid: boolean | null;
   callsToday: number;
+  /** settings.aiDailyLimit: 0 = no limit. */
   cap: number;
   lastError: string | null;
 }
@@ -360,9 +364,9 @@ function fbahSanitizeSettings(raw: unknown): FBAHSettings {
     out.aiThreshold =
       Math.round(fbahClampNumber(threshold, FBAH_AI_THRESHOLD_MIN, FBAH_AI_THRESHOLD_MAX) * 100) / 100;
   }
-  const cap = r["aiDailyCap"];
+  const cap = r["aiDailyLimit"];
   if (typeof cap === "number" && Number.isFinite(cap)) {
-    out.aiDailyCap = Math.round(fbahClampNumber(cap, FBAH_AI_CAP_MIN, FBAH_AI_CAP_MAX));
+    out.aiDailyLimit = Math.round(fbahClampNumber(cap, FBAH_AI_CAP_MIN, FBAH_AI_CAP_MAX));
   }
   return out;
 }

@@ -94,10 +94,10 @@
       renderAIStatus("bad", "AI status unavailable.");
       return;
     }
-    const usage = `${st.callsToday}/${st.cap} calls today`;
+    const usage = st.cap > 0 ? `${st.callsToday}/${st.cap} calls today` : `${st.callsToday} calls today`;
     if (!st.hasKey) renderAIStatus("off", "No key.", "Add TypeSafe API key");
     else if (st.keyValid === false) renderAIStatus("bad", "Invalid key.", "Update key");
-    else if (st.callsToday >= st.cap) renderAIStatus("warn", `Daily cap reached (${usage}).`, "Change cap");
+    else if (st.cap > 0 && st.callsToday >= st.cap) renderAIStatus("warn", `Daily cap reached (${usage}).`, "Change cap");
     else if (st.keyValid === null) renderAIStatus("ok", `Active, key not verified yet · ${usage}`);
     else renderAIStatus("ok", `Active · ${usage}`);
   }

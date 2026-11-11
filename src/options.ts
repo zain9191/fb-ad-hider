@@ -1,5 +1,5 @@
 // Options page: TypeSafe API key (chrome.storage.local, written directly here,
-// never synced), AI threshold and daily cap (chrome.storage.sync settings), and
+// never synced), AI threshold and optional daily limit (chrome.storage.sync settings), and
 // "Clear TypeSafe cache" (asks the background worker; answers only, never the key).
 
 (() => {
@@ -76,7 +76,7 @@
     }
 
     if (st) {
-      usageEl.textContent = `${st.callsToday} of ${st.cap} used today`;
+      usageEl.textContent = st.cap > 0 ? `${st.callsToday} of ${st.cap} used today` : `${st.callsToday} used today (no limit)`;
       say(lastErrorEl, st.lastError ? `Last error: ${st.lastError}` : "", st.lastError ? "warn" : "");
     } else {
       usageEl.textContent = "";
@@ -88,7 +88,7 @@
     aiEnabledEl.checked = settings.aiEnabled;
     thresholdEl.value = String(settings.aiThreshold);
     thresholdOut.value = settings.aiThreshold.toFixed(2);
-    capEl.value = String(settings.aiDailyCap);
+    capEl.value = String(settings.aiDailyLimit);
   }
 
   async function saveSettings(patch: Partial<FBAHSettings>): Promise<void> {
@@ -184,7 +184,7 @@
         renderSettings();
         return;
       }
-      await saveSettings({ aiDailyCap: cap });
+      await saveSettings({ aiDailyLimit: cap });
       await refreshStatus();
     });
 

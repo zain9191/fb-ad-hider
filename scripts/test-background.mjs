@@ -339,7 +339,7 @@ test("cache: counters, a longer 'See more' text and a new worker reuse one answe
 });
 
 test("daily cap: cap_reached with the time until local midnight, no API call", async () => {
-  stores.sync.set("fbah.settings", { aiDailyCap: 1 });
+  stores.sync.set("fbah.settings", { aiDailyLimit: 1 });
   respond = () => ok200();
   const w = startWorker();
   assert.equal((await w.classify(post("First post of the day"))).ok, true);
@@ -349,6 +349,29 @@ test("daily cap: cap_reached with the time until local midnight, no API call", a
   const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
   assert.ok(Math.abs(capped.retryAfterMs - (midnight - now.getTime())) < 5_000, `retryAfterMs ${capped.retryAfterMs}`);
   assert.equal(fetches.length, 1);
+});
+
+test("no daily limit by default: calls go on past 300 a day and are still counted", async () => {
+  const today = new Date();
+  const day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  stores.local.set("fbah.ai.usage", { day, calls: 300 });
+  respond = () => ok200();
+  const w = startWorker();
+  const r = await w.classify(post("Post number 301 of the day"));
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(fetches.length, 1);
+  assert.equal(usageCalls(), 301);
+  const st = await w.send({ type: "fbah/aiStatus" }, FACEBOOK_TAB);
+  assert.equal(st.cap, 0);
+});
+
+test("an old saved aiDailyCap (the former 300 default) is ignored: no limit", async () => {
+  stores.sync.set("fbah.settings", { aiDailyCap: 1 });
+  respond = () => ok200();
+  const w = startWorker();
+  assert.equal((await w.classify(post("First post"))).ok, true);
+  assert.equal((await w.classify(post("Second post"))).ok, true);
+  assert.equal(fetches.length, 2);
 });
 
 test("request: the prompt describes header, ctaText and hasAdLabel; the state carries them", async () => {
@@ -645,7 +668,7 @@ test("batching: an urgent post never waits for a batch; a post still in the open
 });
 
 test("batching: one daily-cap unit per batch; once the cap is reached every post of a batch gets cap_reached without a call", async () => {
-  stores.sync.set("fbah.settings", { aiDailyCap: 2 });
+  stores.sync.set("fbah.settings", { aiDailyLimit: 2 });
   respond = answerAll(() => 0.3);
   const w = startWorker();
   const five = await Promise.all([0, 1, 2, 3, 4].map((i) => w.classify(post(`Cap post ${i}`))));
